@@ -49,8 +49,20 @@ interface INatObservation {
     id: number;
     name: string;
     preferred_common_name?: string | null;
+    // iNat rank level: species = 10, subspecies/variety/form < 10, genus = 20…
+    rank_level?: number | null;
   };
   photos?: INatPhoto[];
+}
+
+/**
+ * Keep only taxa identified to species (or finer), so every round has a real
+ * "Genus species" answer. Prefers iNat's rank_level; falls back to requiring a
+ * binomial name when it's absent.
+ */
+function isSpeciesLevel(taxon: NonNullable<INatObservation["taxon"]>): boolean {
+  if (typeof taxon.rank_level === "number") return taxon.rank_level <= 10;
+  return taxon.name.trim().split(/\s+/).length >= 2;
 }
 
 function shuffle<T>(arr: T[]): T[] {
@@ -99,6 +111,8 @@ async function getPool(rlat: number, rlng: number, radius: number): Promise<Pool
     per_page: "200",
     order_by: "created_at",
     order: "desc",
+    // Only observations identified to species or finer — no genus-level IDs.
+    hrank: "species",
   });
 
   const res = await fetch(`${API}?${params}`, {
@@ -112,7 +126,12 @@ async function getPool(rlat: number, rlng: number, radius: number): Promise<Pool
 
   const data = (await res.json()) as { results?: INatObservation[] };
   const observations = (data.results ?? []).filter(
-    (o) => o.taxon && o.photos && o.photos.length > 0 && o.photos[0].url,
+    (o) =>
+      o.taxon &&
+      isSpeciesLevel(o.taxon) &&
+      o.photos &&
+      o.photos.length > 0 &&
+      o.photos[0].url,
   );
 
   // One entry per distinct species — gives plausible local distractors.

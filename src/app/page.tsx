@@ -7,6 +7,7 @@ import type { GameMode, Round } from "@/lib/inat";
 import AuthButton from "@/components/AuthButton";
 import RoundCard, { type GuessResult } from "@/components/RoundCard";
 import { getStats, saveResult, type Stats } from "@/lib/progress";
+import { getRecentTaxa, pushRecentTaxa } from "@/lib/recent";
 
 type Coords = { lat: number; lng: number };
 type GeoStatus = "idle" | "locating" | "ready" | "denied";
@@ -61,6 +62,9 @@ export default function Home() {
   const [stats, setStats] = useState<Stats | null>(null);
   // Species already shown this game, so we never repeat one (and its photo).
   const [seenTaxa, setSeenTaxa] = useState<number[]>([]);
+  // Species seen in *recent* games (localStorage), excluded to reduce repeats
+  // across games. Snapshotted at game start so it stays stable mid-game.
+  const [recentTaxa, setRecentTaxa] = useState<number[]>([]);
 
   const locate = useCallback(() => {
     if (typeof navigator === "undefined" || !("geolocation" in navigator)) {
@@ -98,7 +102,7 @@ export default function Home() {
     // answered, and we don't want that to refetch the round being viewed.
     // roundSeq drives refetches; the queryFn reads the latest seenTaxa.
     queryKey: ["round", coords?.lat, coords?.lng, radius, mode, roundSeq],
-    queryFn: () => fetchRound(coords!, radius, mode, seenTaxa),
+    queryFn: () => fetchRound(coords!, radius, mode, [...seenTaxa, ...recentTaxa]),
     enabled: started && !gameOver && coords != null,
   });
 
@@ -108,6 +112,7 @@ export default function Home() {
     setRoundNumber(1);
     setLifelinesLeft(LIFELINES);
     setSeenTaxa([]);
+    setRecentTaxa(getRecentTaxa());
     setGameOver(false);
     setStarted(true);
     setSettingsOpen(false);
@@ -134,6 +139,7 @@ export default function Home() {
     setSeenTaxa((prev) =>
       prev.includes(result.correctTaxonId) ? prev : [...prev, result.correctTaxonId],
     );
+    pushRecentTaxa([result.correctTaxonId]);
   }
 
   const round = roundQuery.data;
