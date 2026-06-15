@@ -137,6 +137,46 @@ async function getPool(rlat: number, rlng: number, radius: number): Promise<Pool
   return pool;
 }
 
+/**
+ * Build the photo/options/token for one round from a chosen `question` species,
+ * drawing 3 distractors from the rest of `pool`. The shared core of solo and VS
+ * rounds (everything in a `Round` except `location`).
+ */
+function assembleRound(
+  question: PoolItem,
+  pool: PoolItem[],
+  mode: GameMode,
+): Omit<Round, "location"> {
+  const distractors = shuffle(
+    pool.filter((p) => p.taxonId !== question.taxonId),
+  ).slice(0, 3);
+
+  const options = shuffle(
+    [question, ...distractors].map<RoundOption>((p) => ({
+      taxonId: p.taxonId,
+      commonName: p.commonName,
+      scientificName: p.scientificName,
+    })),
+  );
+
+  return {
+    photo: {
+      url: question.photoUrl,
+      attribution: question.attribution,
+      licenseCode: question.licenseCode,
+      observationUrl: question.observationUrl,
+    },
+    // Reveal options up front only in normal mode; otherwise unlock via lifeline.
+    options: mode === "normal" ? options : null,
+    token: sealAnswer({
+      taxonId: question.taxonId,
+      scientificName: question.scientificName,
+      commonName: question.commonName,
+      options,
+    }),
+  };
+}
+
 export async function buildRound(
   lat: number,
   lng: number,
@@ -168,33 +208,70 @@ export async function buildRound(
   if (questionPool.length === 0) questionPool = pool;
   const question = questionPool[Math.floor(Math.random() * questionPool.length)];
 
-  const distractors = shuffle(
-    pool.filter((p) => p.taxonId !== question.taxonId),
-  ).slice(0, 3);
+  return { ...assembleRound(question, pool, mode), location: { lat: rlat, lng: rlng, radius } };
+}
 
-  const options = shuffle(
-    [question, ...distractors].map<RoundOption>((p) => ({
-      taxonId: p.taxonId,
-      commonName: p.commonName,
-      scientificName: p.scientificName,
-    })),
-  );
+export interface MatchLocation {
+  lat: number;
+  lng: number;
+  radius: number;
+}
 
-  return {
-    photo: {
-      url: question.photoUrl,
-      attribution: question.attribution,
-      licenseCode: question.licenseCode,
-      observationUrl: question.observationUrl,
-    },
-    // Reveal options up front only in normal mode; otherwise unlock via lifeline.
-    options: mode === "normal" ? options : null,
-    token: sealAnswer({
-      taxonId: question.taxonId,
-      scientificName: question.scientificName,
-      commonName: question.commonName,
-      options,
-    }),
-    location: { lat: rlat, lng: rlng, radius },
-  };
+/** One frozen VS round: a playable round plus which player's area it came from. */
+export interface MatchRound extends Omit<Round, "location"> {
+  owner: "challenger" | "opponent";
+}
+
+/** Pick `n` distinct species to use as questions, preferring ones with a common
+ * name in hard mode. Throws if the pool can't supply that many distinct plants. */
+function pickQuestions(pool: PoolItem[], n: number, mode: GameMode): PoolItem[] {
+  let candidates = pool;
+  if (mode === "hard") {
+    const named = pool.filter((p) => p.commonName);
+    if (named.length >= n) candidates = named;
+  }
+  if (candidates.length < n) {
+    throw new RoundError(
+      "Not enough research-grade plants in one of the areas. Try a wider search range.",
+      404,
+    );
+  }
+  return shuffle([...candidates]).slice(0, n);
+}
+
+/**
+ * Build a frozen set of `count` rounds for a VS match, sourcing half from each
+ * player's location and interleaving them (challenger, opponent, challenger…).
+ * Each round's answer is sealed in its token exactly like a solo round, so the
+ * frozen set is safe to store and serve to both players.
+ */
+export async function buildRoundsForLocations(
+  challengerLoc: MatchLocation,
+  opponentLoc: MatchLocation,
+  mode: GameMode = "normal",
+  count = 16,
+): Promise<MatchRound[]> {
+  const half = count / 2;
+  const [cPool, oPool] = await Promise.all([
+    getPool(
+      Number(challengerLoc.lat.toFixed(3)),
+      Number(challengerLoc.lng.toFixed(3)),
+      challengerLoc.radius,
+    ),
+    getPool(
+      Number(opponentLoc.lat.toFixed(3)),
+      Number(opponentLoc.lng.toFixed(3)),
+      opponentLoc.radius,
+    ),
+  ]);
+
+  const cQuestions = pickQuestions(cPool, half, mode);
+  const oQuestions = pickQuestions(oPool, half, mode);
+
+  const rounds: MatchRound[] = [];
+  for (let i = 0; i < half; i++) {
+    rounds.push({ ...assembleRound(cQuestions[i], cPool, mode), owner: "challenger" });
+    rounds.push({ ...assembleRound(oQuestions[i], oPool, mode), owner: "opponent" });
+  }
+  return rounds;
 }

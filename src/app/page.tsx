@@ -1,20 +1,15 @@
 "use client";
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
-import type { GameMode, Round, RoundOption } from "@/lib/inat";
+import Link from "next/link";
+import type { GameMode, Round } from "@/lib/inat";
 import AuthButton from "@/components/AuthButton";
+import RoundCard, { type GuessResult } from "@/components/RoundCard";
 import { getStats, saveResult, type Stats } from "@/lib/progress";
 
 type Coords = { lat: number; lng: number };
 type GeoStatus = "idle" | "locating" | "ready" | "denied";
-type GuessResult = {
-  correct: boolean;
-  correctTaxonId: number;
-  scientificName: string;
-  commonName: string | null;
-};
-type GuessPayload = { token: string; taxonId?: number; text?: string; mode?: GameMode };
 
 const TOTAL_ROUNDS = 15;
 const LIFELINES = 3;
@@ -48,28 +43,6 @@ async function fetchRound(
   return data as Round;
 }
 
-async function submitGuess(payload: GuessPayload): Promise<GuessResult> {
-  const res = await fetch("/api/guess", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error ?? "Failed to check your guess.");
-  return data as GuessResult;
-}
-
-async function fetchLifeline(token: string): Promise<RoundOption[]> {
-  const res = await fetch("/api/lifeline", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error ?? "Failed to use lifeline.");
-  return data.options as RoundOption[];
-}
-
 export default function Home() {
   const [coords, setCoords] = useState<Coords | null>(null);
   const [geoStatus, setGeoStatus] = useState<GeoStatus>("idle");
@@ -84,10 +57,6 @@ export default function Home() {
   const [roundNumber, setRoundNumber] = useState(1);
   const [lifelinesLeft, setLifelinesLeft] = useState(LIFELINES);
 
-  const [chosen, setChosen] = useState<number | null>(null);
-  const [typed, setTyped] = useState("");
-  const [revealedOptions, setRevealedOptions] = useState<RoundOption[] | null>(null);
-  const [result, setResult] = useState<GuessResult | null>(null);
   const [score, setScore] = useState(0);
   const [stats, setStats] = useState<Stats | null>(null);
   // Species already shown this game, so we never repeat one (and its photo).
@@ -133,34 +102,6 @@ export default function Home() {
     enabled: started && !gameOver && coords != null,
   });
 
-  const guess = useMutation({
-    mutationFn: submitGuess,
-    onSuccess: (data) => {
-      setResult(data);
-      setScore((s) => s + (data.correct ? 1 : 0));
-      setSeenTaxa((prev) =>
-        prev.includes(data.correctTaxonId) ? prev : [...prev, data.correctTaxonId],
-      );
-    },
-  });
-
-  const lifeline = useMutation({
-    mutationFn: fetchLifeline,
-    onSuccess: (options) => {
-      setRevealedOptions(options);
-      setLifelinesLeft((n) => n - 1);
-    },
-  });
-
-  function resetRoundState() {
-    setChosen(null);
-    setTyped("");
-    setRevealedOptions(null);
-    setResult(null);
-    guess.reset();
-    lifeline.reset();
-  }
-
   function startGame() {
     setScore(0);
     setStats(null);
@@ -170,7 +111,6 @@ export default function Home() {
     setGameOver(false);
     setStarted(true);
     setSettingsOpen(false);
-    resetRoundState();
     setRoundSeq((n) => n + 1);
   }
 
@@ -186,19 +126,14 @@ export default function Home() {
       return;
     }
     setRoundNumber((n) => n + 1);
-    resetRoundState();
     setRoundSeq((n) => n + 1);
   }
 
-  function pickOption(taxonId: number, token: string) {
-    if (result || guess.isPending) return;
-    setChosen(taxonId);
-    guess.mutate({ token, taxonId });
-  }
-
-  function submitTyped(token: string) {
-    if (result || guess.isPending || !typed.trim()) return;
-    guess.mutate({ token, text: typed, mode });
+  function onAnswered(result: GuessResult) {
+    setScore((s) => s + (result.correct ? 1 : 0));
+    setSeenTaxa((prev) =>
+      prev.includes(result.correctTaxonId) ? prev : [...prev, result.correctTaxonId],
+    );
   }
 
   const round = roundQuery.data;
@@ -213,13 +148,6 @@ export default function Home() {
     coords.lng <= 180;
 
   const modeLabel = MODES.find((m) => m.id === mode)!.label;
-  const options = round?.options ?? revealedOptions;
-  const canUseLifeline =
-    mode !== "normal" &&
-    round != null &&
-    !result &&
-    revealedOptions == null &&
-    lifelinesLeft > 0;
 
   return (
     <main className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-6 px-4 py-8">
@@ -228,7 +156,15 @@ export default function Home() {
           🌿 Treeoguessr
         </h1>
         <div className="flex flex-col items-end gap-1">
-          <AuthButton />
+          <div className="flex items-center gap-3">
+            <Link
+              href="/vs"
+              className="text-sm font-medium text-green-700 underline-offset-2 hover:underline dark:text-green-400"
+            >
+              ⚔️ Play a friend
+            </Link>
+            <AuthButton />
+          </div>
           {started && !gameOver && (
             <div className="text-right text-sm">
               <span className="font-medium">
@@ -393,124 +329,22 @@ export default function Home() {
           )}
 
           {round && (
-            <div className="flex flex-col gap-4">
-              <figure className="overflow-hidden rounded-xl border border-black/10 dark:border-white/15">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={round.photo.url}
-                  alt="A plant observed near you — can you identify it?"
-                  className="h-72 w-full bg-black/5 object-cover dark:bg-white/5"
-                />
-                <figcaption className="px-3 py-2 text-xs opacity-60">
-                  Photo: {round.photo.attribution || "iNaturalist contributor"}
-                  {round.photo.licenseCode ? ` (${round.photo.licenseCode})` : ""} ·{" "}
-                  <a
-                    href={round.photo.observationUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="underline"
-                  >
-                    View on iNaturalist
-                  </a>
-                </figcaption>
-              </figure>
-
-              {/* Lifelines bar (typed modes only) */}
-              {mode !== "normal" && (
-                <div className="flex items-center justify-between text-sm">
-                  <span className="opacity-70">
-                    Lifelines: {"💡".repeat(lifelinesLeft) || "—"}
-                  </span>
-                  {canUseLifeline && (
-                    <button
-                      onClick={() => lifeline.mutate(round.token)}
-                      disabled={lifeline.isPending}
-                      className="rounded-md border border-green-600 px-3 py-1 font-medium text-green-700 transition hover:bg-green-50 disabled:opacity-50 dark:text-green-400 dark:hover:bg-green-950/30"
-                    >
-                      {lifeline.isPending ? "Revealing…" : "Use a lifeline"}
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* Answer input: multiple choice (normal, or after lifeline) vs typed */}
-              {options ? (
-                <div className="grid gap-2">
-                  {options.map((opt) => {
-                    const isCorrect = result?.correctTaxonId === opt.taxonId;
-                    const isChosenWrong =
-                      result != null && chosen === opt.taxonId && !result.correct;
-                    let style =
-                      "border-black/15 hover:border-green-500 hover:bg-green-50 dark:border-white/20 dark:hover:bg-green-950/30";
-                    if (result) {
-                      if (isCorrect)
-                        style = "border-green-600 bg-green-100 dark:bg-green-900/40";
-                      else if (isChosenWrong)
-                        style = "border-red-500 bg-red-100 dark:bg-red-900/40";
-                      else style = "border-black/10 opacity-60 dark:border-white/10";
-                    }
-                    return (
-                      <button
-                        key={opt.taxonId}
-                        onClick={() => pickOption(opt.taxonId, round.token)}
-                        disabled={result != null || guess.isPending}
-                        className={`rounded-lg border px-4 py-3 text-left transition ${style}`}
-                      >
-                        <span className="block font-medium">
-                          {opt.commonName ?? opt.scientificName}
-                        </span>
-                        {opt.commonName && (
-                          <span className="block text-xs italic opacity-60">
-                            {opt.scientificName}
-                          </span>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={typed}
-                    disabled={result != null}
-                    placeholder={
-                      mode === "botanist" ? "Scientific name…" : "Common name…"
-                    }
-                    onChange={(e) => setTyped(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && submitTyped(round.token)}
-                    className="w-full rounded-lg border border-black/15 bg-transparent px-3 py-2 dark:border-white/20"
-                  />
-                  <button
-                    onClick={() => submitTyped(round.token)}
-                    disabled={result != null || guess.isPending || !typed.trim()}
-                    className="rounded-lg bg-green-600 px-4 py-2 font-semibold text-white transition hover:bg-green-700 disabled:opacity-40"
-                  >
-                    Guess
-                  </button>
-                </div>
-              )}
-
-              {result && (
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-sm">
-                    <span className="font-semibold">
-                      {result.correct ? "✅ Correct!" : "❌ Not quite."}
-                    </span>
-                    <div className="opacity-70">
-                      {result.commonName ? `${result.commonName} · ` : ""}
-                      <span className="italic">{result.scientificName}</span>
-                    </div>
-                  </div>
-                  <button
-                    onClick={nextRound}
-                    className="shrink-0 rounded-lg bg-green-600 px-4 py-2 font-semibold text-white transition hover:bg-green-700"
-                  >
-                    {roundNumber >= TOTAL_ROUNDS ? "See results" : "Next plant →"}
-                  </button>
-                </div>
-              )}
-            </div>
+            <RoundCard
+              key={roundSeq}
+              round={round}
+              mode={mode}
+              lifelinesLeft={lifelinesLeft}
+              onUseLifeline={() => setLifelinesLeft((n) => n - 1)}
+              onAnswered={onAnswered}
+              nextButton={
+                <button
+                  onClick={nextRound}
+                  className="shrink-0 rounded-lg bg-green-600 px-4 py-2 font-semibold text-white transition hover:bg-green-700"
+                >
+                  {roundNumber >= TOTAL_ROUNDS ? "See results" : "Next plant →"}
+                </button>
+              }
+            />
           )}
         </section>
       )}

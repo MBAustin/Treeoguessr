@@ -6,9 +6,12 @@ once the Supabase env vars are present. Do the steps in order.
 ## 1. Supabase project
 1. Create a project at https://supabase.com (free tier is plenty).
 2. **SQL Editor → New query**, paste the contents of [`supabase/schema.sql`](supabase/schema.sql), Run.
+   For VS mode (usernames, friends, challenges), also run [`supabase/vs.sql`](supabase/vs.sql).
 3. **Project Settings → API**, copy:
    - **Project URL** → `NEXT_PUBLIC_SUPABASE_URL`
    - **anon / public** key (newer dashboards call it **Publishable**) → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   - **service_role** key (secret) → `SUPABASE_SERVICE_ROLE_KEY` — **VS mode only**, server-side
+     only. Never expose it to the browser or commit it.
 
 ## 2. Google sign-in
 1. In **Google Cloud Console** (https://console.cloud.google.com):
@@ -32,9 +35,11 @@ Add to `.env.local` (see [`.env.example`](.env.example)):
 ```
 NEXT_PUBLIC_SUPABASE_URL=...
 NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+SUPABASE_SERVICE_ROLE_KEY=...   # VS mode only
 ```
 Restart `npm run dev`. A **Sign in with Google** button appears top-right;
-finishing a game now saves your score and shows Best / games played.
+finishing a game now saves your score and shows Best / games played. The
+**⚔️ Play a friend** link opens VS mode (pick a username, add friends, challenge them).
 
 ## 4. Deploy to Vercel
 1. Put the code on GitHub:
@@ -51,6 +56,7 @@ finishing a game now saves your score and shows Best / games played.
    - `ROUND_SECRET` (generate: `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`)
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   - `SUPABASE_SERVICE_ROLE_KEY` (for VS mode)
 4. Deploy. Then add the live `https://<your-app>.vercel.app/**` URL to the
    Supabase Redirect URLs (step 2.3) and set it as the Supabase Site URL.
 
