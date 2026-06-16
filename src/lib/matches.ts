@@ -1,6 +1,6 @@
 import { getSupabaseBrowser } from "./supabase/client";
 import { currentUserId, profileMap } from "./profiles";
-import type { GameMode, RoundOption } from "./inat";
+import type { GameMode, RoundOption, RoundPhoto } from "./inat";
 
 export interface MatchLocation {
   lat: number;
@@ -11,12 +11,7 @@ export interface MatchLocation {
 /** A frozen round as stored/served to the client — no answer, just what's needed to play. */
 export interface ClientRound {
   token: string;
-  photo: {
-    url: string;
-    attribution: string;
-    licenseCode: string | null;
-    observationUrl: string;
-  };
+  photos: RoundPhoto[];
   options: RoundOption[] | null;
   owner: "challenger" | "opponent";
 }
@@ -94,6 +89,11 @@ export async function getMatch(
   const { data } = await sb.from("matches").select("*").eq("id", matchId).maybeSingle();
   if (!data) return null;
   const match = data as Match;
+  // Tolerate matches frozen before the multi-photo change (single `photo`).
+  for (const r of match.rounds ?? []) {
+    const legacy = r as ClientRound & { photo?: RoundPhoto };
+    if (!legacy.photos && legacy.photo) legacy.photos = [legacy.photo];
+  }
   const names = await profileMap([match.challenger, match.opponent]);
   return {
     match,

@@ -14,13 +14,17 @@ export interface RoundOption {
   scientificName: string;
 }
 
+export interface RoundPhoto {
+  url: string;
+  attribution: string;
+  licenseCode: string | null;
+  observationUrl: string;
+}
+
 export interface Round {
-  photo: {
-    url: string;
-    attribution: string;
-    licenseCode: string | null;
-    observationUrl: string;
-  };
+  // One or more local photos of the answer species — shown as a carousel client
+  // side so the player can see several specimens when enough exist nearby.
+  photos: RoundPhoto[];
   // Options are only sent in the clear for normal mode. In hard/botanist mode
   // they stay sealed in the token and are revealed via /api/lifeline.
   options: RoundOption[] | null;
@@ -143,10 +147,12 @@ const FETCH_CONCURRENCY = 5;
 const AREA_TTL_MS = 60 * 60 * 1000;
 const areaPoolCache = new Map<string, { pool: AreaPool; expires: number }>();
 
-// When fetching a question photo, look at this many recent local observations of
-// the species and pick one at random — gives variety without a deep crawl, and
-// the taxon filter keeps the result set tiny (well under the 10k page ceiling).
+// When fetching question photos, look at this many recent local observations of
+// the species — gives variety without a deep crawl, and the taxon filter keeps
+// the result set tiny (well under the 10k page ceiling).
 const PHOTO_CANDIDATES = 30;
+// How many distinct local photos to surface per question, for the carousel.
+const MAX_PHOTOS_PER_ROUND = 6;
 
 async function fetchSpeciesPage(
   rlat: number,
@@ -229,16 +235,17 @@ export async function getAreaPool(lat: number, lng: number, radius: number): Pro
 }
 
 /**
- * A local, research-grade, CC-licensed photo of one species near (rlat,rlng), or
- * null if the species has none nearby. Filtering by taxon keeps this to a single
- * small request that sidesteps the 10k observation-pagination ceiling.
+ * Up to MAX_PHOTOS_PER_ROUND local, research-grade, CC-licensed photos of one
+ * species near (rlat,rlng), each from a different observation — empty if the
+ * species has none nearby. Filtering by taxon keeps this to a single small
+ * request that sidesteps the 10k observation-pagination ceiling.
  */
-async function fetchLocalPhoto(
+async function fetchLocalPhotos(
   taxonId: number,
   rlat: number,
   rlng: number,
   radius: number,
-): Promise<PoolPhoto | null> {
+): Promise<PoolPhoto[]> {
   const params = new URLSearchParams({
     taxon_id: String(taxonId),
     lat: String(rlat),
@@ -254,14 +261,14 @@ async function fetchLocalPhoto(
   let results: INatObservation[];
   try {
     const res = await fetch(`${API}?${params}`, { headers: API_HEADERS, cache: "no-store" });
-    if (!res.ok) return null;
+    if (!res.ok) return [];
     results = ((await res.json()) as { results?: INatObservation[] }).results ?? [];
   } catch {
-    return null;
+    return [];
   }
 
-  // Collect one CC-licensed photo per observation (the matched obs may also carry
-  // all-rights-reserved photos), then pick one at random for variety.
+  // One CC-licensed photo per observation (the matched obs may also carry
+  // all-rights-reserved photos), then a random subset for the carousel.
   const photos: PoolPhoto[] = [];
   for (const o of results) {
     const photo = (o.photos ?? []).find(
@@ -275,15 +282,14 @@ async function fetchLocalPhoto(
       observationUrl: `https://www.inaturalist.org/observations/${o.id}`,
     });
   }
-  if (photos.length === 0) return null;
-  return photos[Math.floor(Math.random() * photos.length)];
+  return shuffle(photos).slice(0, MAX_PHOTOS_PER_ROUND);
 }
 
 /**
- * Pick up to `n` distinct question species from `candidates`, each paired with a
- * fetched local photo. Walks the (shuffled) candidates with bounded concurrency,
- * skipping any species that has no usable local photo, and stops as soon as `n`
- * are found — so the common case costs ~`n` photo requests.
+ * Pick up to `n` distinct question species from `candidates`, each paired with
+ * its fetched local photos. Walks the (shuffled) candidates with bounded
+ * concurrency, skipping any species that has no usable local photo, and stops as
+ * soon as `n` are found — so the common case costs ~`n` photo requests.
  */
 async function collectQuestionsWithPhotos(
   candidates: AreaSpecies[],
@@ -291,16 +297,16 @@ async function collectQuestionsWithPhotos(
   rlat: number,
   rlng: number,
   radius: number,
-): Promise<{ species: AreaSpecies; photo: PoolPhoto }[]> {
+): Promise<{ species: AreaSpecies; photos: PoolPhoto[] }[]> {
   const shuffled = shuffle([...candidates]);
-  const out: { species: AreaSpecies; photo: PoolPhoto }[] = [];
+  const out: { species: AreaSpecies; photos: PoolPhoto[] }[] = [];
   let next = 0;
   const workers = Math.min(FETCH_CONCURRENCY, Math.max(1, n), shuffled.length);
   async function worker() {
     while (out.length < n && next < shuffled.length) {
       const species = shuffled[next++];
-      const photo = await fetchLocalPhoto(species.taxonId, rlat, rlng, radius);
-      if (photo && out.length < n) out.push({ species, photo });
+      const photos = await fetchLocalPhotos(species.taxonId, rlat, rlng, radius);
+      if (photos.length > 0 && out.length < n) out.push({ species, photos });
     }
   }
   await Promise.all(Array.from({ length: workers }, worker));
@@ -352,13 +358,13 @@ function pickDistractors(question: AreaSpecies, pool: AreaSpecies[], n: number):
 }
 
 /**
- * Build the photo/options/token for one round from a chosen `question` species
- * and its `photo`, drawing 3 distractors from the rest of `pool`. The shared core
+ * Build the photos/options/token for one round from a chosen `question` species
+ * and its `photos`, drawing 3 distractors from the rest of `pool`. The shared core
  * of solo and VS rounds (everything in a `Round` except `location`).
  */
 function assembleRound(
   question: AreaSpecies,
-  photo: PoolPhoto,
+  photos: PoolPhoto[],
   pool: AreaSpecies[],
   mode: GameMode,
 ): Omit<Round, "location"> {
@@ -373,12 +379,12 @@ function assembleRound(
   );
 
   return {
-    photo: {
-      url: photo.photoUrl,
-      attribution: photo.attribution,
-      licenseCode: photo.licenseCode,
-      observationUrl: photo.observationUrl,
-    },
+    photos: photos.map((p) => ({
+      url: p.photoUrl,
+      attribution: p.attribution,
+      licenseCode: p.licenseCode,
+      observationUrl: p.observationUrl,
+    })),
     // Reveal options up front only in normal mode; otherwise unlock via lifeline.
     options: mode === "normal" ? options : null,
     token: sealAnswer({
@@ -442,7 +448,7 @@ export async function buildRound(
   }
 
   return {
-    ...assembleRound(picked[0].species, picked[0].photo, pool.species, mode),
+    ...assembleRound(picked[0].species, picked[0].photos, pool.species, mode),
     location: { lat: rlat, lng: rlng, radius },
   };
 }
@@ -465,7 +471,7 @@ async function pickMatchQuestions(
   pool: AreaPool,
   n: number,
   mode: GameMode,
-): Promise<{ species: AreaSpecies; photo: PoolPhoto }[]> {
+): Promise<{ species: AreaSpecies; photos: PoolPhoto[] }[]> {
   let candidates = pool.species;
   if (mode === "hard") {
     const named = pool.species.filter((p) => p.commonName);
@@ -513,11 +519,11 @@ export async function buildRoundsForLocations(
   const rounds: MatchRound[] = [];
   for (let i = 0; i < half; i++) {
     rounds.push({
-      ...assembleRound(cQuestions[i].species, cQuestions[i].photo, cPool.species, mode),
+      ...assembleRound(cQuestions[i].species, cQuestions[i].photos, cPool.species, mode),
       owner: "challenger",
     });
     rounds.push({
-      ...assembleRound(oQuestions[i].species, oQuestions[i].photo, oPool.species, mode),
+      ...assembleRound(oQuestions[i].species, oQuestions[i].photos, oPool.species, mode),
       owner: "opponent",
     });
   }

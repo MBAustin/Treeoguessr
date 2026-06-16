@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, type ReactNode } from "react";
-import type { GameMode, RoundOption } from "@/lib/inat";
+import type { GameMode, RoundOption, RoundPhoto } from "@/lib/inat";
 
 export type GuessResult = {
   correct: boolean;
@@ -16,12 +16,7 @@ export type Guess = { taxonId?: number; text?: string };
 /** The playable shape of a round, shared by solo (`Round`) and VS (`ClientRound`). */
 export interface PlayableRound {
   token: string;
-  photo: {
-    url: string;
-    attribution: string;
-    licenseCode: string | null;
-    observationUrl: string;
-  };
+  photos: RoundPhoto[];
   options: RoundOption[] | null;
 }
 
@@ -78,10 +73,15 @@ export default function RoundCard({
   const [pending, setPending] = useState(false);
   const [lifelinePending, setLifelinePending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [photoIdx, setPhotoIdx] = useState(0);
 
   const options = round.options ?? revealedOptions;
   const canUseLifeline =
     mode !== "normal" && !result && revealedOptions == null && lifelinesLeft > 0;
+
+  const photos = round.photos ?? [];
+  const current = photos.length ? photoIdx % photos.length : 0;
+  const photo = photos[current];
 
   async function answer(guess: Guess) {
     if (result || pending) return;
@@ -124,21 +124,48 @@ export default function RoundCard({
 
   return (
     <div className="flex flex-col gap-4">
+      {photo && (
       <figure className="overflow-hidden rounded-xl border border-black/10 dark:border-white/15">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={round.photo.url}
-          alt="A plant observed near one of you — can you identify it?"
-          className="h-72 w-full bg-black/5 object-cover dark:bg-white/5"
-        />
+        <div className="relative bg-black/5 dark:bg-white/5">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={photo.url}
+            alt="A plant observed near one of you — can you identify it?"
+            className="h-80 w-full object-contain"
+          />
+          {photos.length > 1 && (
+            <>
+              <button
+                type="button"
+                aria-label="Previous photo"
+                onClick={() => setPhotoIdx((i) => (i - 1 + photos.length) % photos.length)}
+                className="absolute left-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 text-lg leading-none text-white transition hover:bg-black/65"
+              >
+                ‹
+              </button>
+              <button
+                type="button"
+                aria-label="Next photo"
+                onClick={() => setPhotoIdx((i) => (i + 1) % photos.length)}
+                className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-black/45 text-lg leading-none text-white transition hover:bg-black/65"
+              >
+                ›
+              </button>
+              <div className="absolute bottom-2 right-2 rounded-full bg-black/55 px-2 py-0.5 text-xs tabular-nums text-white">
+                {current + 1} / {photos.length}
+              </div>
+            </>
+          )}
+        </div>
         <figcaption className="px-3 py-2 text-xs opacity-60">
-          Photo: {round.photo.attribution || "iNaturalist contributor"}
-          {round.photo.licenseCode ? ` (${round.photo.licenseCode})` : ""} ·{" "}
-          <a href={round.photo.observationUrl} target="_blank" rel="noreferrer" className="underline">
+          Photo: {photo.attribution || "iNaturalist contributor"}
+          {photo.licenseCode ? ` (${photo.licenseCode})` : ""} ·{" "}
+          <a href={photo.observationUrl} target="_blank" rel="noreferrer" className="underline">
             View on iNaturalist
           </a>
         </figcaption>
       </figure>
+      )}
 
       {mode !== "normal" && (
         <div className="flex items-center justify-between text-sm">
