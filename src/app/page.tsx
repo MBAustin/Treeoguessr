@@ -7,13 +7,16 @@ import type { GameMode, Round } from "@/lib/inat";
 import AuthButton from "@/components/AuthButton";
 import RoundCard, { type GuessResult } from "@/components/RoundCard";
 import { getStats, saveResult, type Stats } from "@/lib/progress";
-import { getRecentTaxa, pushRecentTaxa } from "@/lib/recent";
+import { useUser } from "@/lib/useUser";
 
 type Coords = { lat: number; lng: number };
 type GeoStatus = "idle" | "locating" | "ready" | "denied";
 
 const TOTAL_ROUNDS = 15;
 const LIFELINES = 3;
+// How many of the just-shown species to keep out of the next round, so nothing
+// repeats back-to-back (a missed species can return after this many rounds).
+const COOLDOWN = 2;
 
 const MODES: { id: GameMode; label: string; blurb: string }[] = [
   { id: "normal", label: "Normal", blurb: "Pick the plant from 4 choices." },
@@ -29,7 +32,7 @@ async function fetchRound(
   coords: Coords,
   radius: number,
   mode: GameMode,
-  exclude: number[],
+  cooldown: number[],
 ): Promise<Round> {
   const params = new URLSearchParams({
     lat: String(coords.lat),
@@ -37,11 +40,45 @@ async function fetchRound(
     radius: String(radius),
     mode,
   });
-  if (exclude.length) params.set("exclude", exclude.join(","));
+  if (cooldown.length) params.set("cooldown", cooldown.join(","));
   const res = await fetch(`/api/round?${params}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ?? "Failed to load a plant.");
   return data as Round;
+}
+
+/** A value that only updates after it stops changing for `delayMs`. Keeps the
+ *  range slider snappy while throttling the area-progress fetch behind it, so
+ *  dragging it doesn't fire a request (and a burst of iNat calls) per tick. */
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(id);
+  }, [value, delayMs]);
+  return debounced;
+}
+
+interface AreaProgress {
+  guessed: number;
+  total: number;
+}
+
+async function fetchAreaProgress(
+  coords: Coords,
+  radius: number,
+  mode: GameMode,
+): Promise<AreaProgress> {
+  const params = new URLSearchParams({
+    lat: String(coords.lat),
+    lng: String(coords.lng),
+    radius: String(radius),
+    mode,
+  });
+  const res = await fetch(`/api/area-progress?${params}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error ?? "Failed to load area progress.");
+  return data as AreaProgress;
 }
 
 export default function Home() {
@@ -60,11 +97,12 @@ export default function Home() {
 
   const [score, setScore] = useState(0);
   const [stats, setStats] = useState<Stats | null>(null);
-  // Species already shown this game, so we never repeat one (and its photo).
-  const [seenTaxa, setSeenTaxa] = useState<number[]>([]);
-  // Species seen in *recent* games (localStorage), excluded to reduce repeats
-  // across games. Snapshotted at game start so it stays stable mid-game.
-  const [recentTaxa, setRecentTaxa] = useState<number[]>([]);
+  // The last few species shown, kept out of the next round so nothing repeats
+  // back-to-back. Mastered species are excluded server-side from the player's
+  // profile; this is just a short in-session anti-repeat window.
+  const [cooldown, setCooldown] = useState<number[]>([]);
+
+  const { user } = useUser();
 
   const locate = useCallback(() => {
     if (typeof navigator === "undefined" || !("geolocation" in navigator)) {
@@ -98,12 +136,24 @@ export default function Home() {
   }, [locate]);
 
   const roundQuery = useQuery({
-    // seenTaxa is deliberately not in the key — it updates when a round is
+    // cooldown is deliberately not in the key — it updates when a round is
     // answered, and we don't want that to refetch the round being viewed.
-    // roundSeq drives refetches; the queryFn reads the latest seenTaxa.
+    // roundSeq drives refetches; the queryFn reads the latest cooldown.
     queryKey: ["round", coords?.lat, coords?.lng, radius, mode, roundSeq],
-    queryFn: () => fetchRound(coords!, radius, mode, [...seenTaxa, ...recentTaxa]),
+    queryFn: () => fetchRound(coords!, radius, mode, cooldown),
     enabled: started && !gameOver && coords != null,
+  });
+
+  // "You've identified x of y species in this area" — signed-in only. Refetched
+  // when the area/mode changes and after each finished game (gameOver flips).
+  // Uses a debounced radius so dragging the range slider doesn't fire a request
+  // (and a burst of iNat species_counts calls) for every intermediate value.
+  const debouncedRadius = useDebouncedValue(radius, 500);
+  const progressQuery = useQuery({
+    queryKey: ["area-progress", coords?.lat, coords?.lng, debouncedRadius, mode, user?.id, gameOver],
+    queryFn: () => fetchAreaProgress(coords!, debouncedRadius, mode),
+    enabled: coords != null && user != null,
+    staleTime: 60_000,
   });
 
   function startGame() {
@@ -111,8 +161,7 @@ export default function Home() {
     setStats(null);
     setRoundNumber(1);
     setLifelinesLeft(LIFELINES);
-    setSeenTaxa([]);
-    setRecentTaxa(getRecentTaxa());
+    setCooldown([]);
     setGameOver(false);
     setStarted(true);
     setSettingsOpen(false);
@@ -136,10 +185,9 @@ export default function Home() {
 
   function onAnswered(result: GuessResult) {
     setScore((s) => s + (result.correct ? 1 : 0));
-    setSeenTaxa((prev) =>
-      prev.includes(result.correctTaxonId) ? prev : [...prev, result.correctTaxonId],
-    );
-    pushRecentTaxa([result.correctTaxonId]);
+    // Keep a short rolling window of just-shown species for the anti-repeat
+    // cooldown. The guess itself is recorded on the player's profile server-side.
+    setCooldown((prev) => [result.correctTaxonId, ...prev].slice(0, COOLDOWN));
   }
 
   const round = roundQuery.data;
@@ -163,6 +211,12 @@ export default function Home() {
         </h1>
         <div className="flex flex-col items-end gap-1">
           <div className="flex items-center gap-3">
+            <Link
+              href="/profile"
+              className="text-sm font-medium text-green-700 underline-offset-2 hover:underline dark:text-green-400"
+            >
+              👤 Profile
+            </Link>
             <Link
               href="/vs"
               className="text-sm font-medium text-green-700 underline-offset-2 hover:underline dark:text-green-400"
@@ -281,6 +335,33 @@ export default function Home() {
               </div>
               <p className="mt-2 text-xs opacity-70">{MODES.find((m) => m.id === mode)!.blurb}</p>
             </div>
+
+            {hasValidCoords && (
+              <p className="mt-4 text-sm">
+                {user ? (
+                  progressQuery.data ? (
+                    <span className="text-green-700 dark:text-green-400">
+                      🌿 You&apos;ve identified{" "}
+                      <span className="font-semibold tabular-nums">
+                        {progressQuery.data.guessed} of {progressQuery.data.total}
+                      </span>{" "}
+                      species in this area ({modeLabel} mode)
+                    </span>
+                  ) : progressQuery.isError ? (
+                    <span className="opacity-60">Couldn&apos;t load your area progress.</span>
+                  ) : (
+                    <span className="opacity-60">Counting species in this area…</span>
+                  )
+                ) : (
+                  <span className="opacity-60">
+                    <Link href="/profile" className="underline underline-offset-2">
+                      Sign in
+                    </Link>{" "}
+                    to track which species you&apos;ve identified.
+                  </span>
+                )}
+              </p>
+            )}
 
             <button
               onClick={startGame}

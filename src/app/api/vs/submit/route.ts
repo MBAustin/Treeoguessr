@@ -2,6 +2,8 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient, adminEnabled } from "@/lib/supabase/admin";
 import { openAnswer } from "@/lib/sign";
 import { matchesAnswer } from "@/lib/match";
+import { recordGuess } from "@/lib/mastery";
+import type { GameMode } from "@/lib/inat";
 
 interface Guess {
   taxonId?: number;
@@ -62,10 +64,24 @@ export async function POST(request: Request) {
   }
 
   const rounds = (match.rounds ?? []) as { token: string }[];
+  const mode = match.mode as GameMode;
   let score = 0;
+  // Record each answered round against this player's per-mode profile, alongside
+  // scoring. Best-effort and parallel; never blocks the result.
+  const records: Promise<void>[] = [];
   for (let i = 0; i < rounds.length; i++) {
-    if (guesses[i] && isCorrect(rounds[i].token, guesses[i], match.mode)) score++;
+    const guess = guesses[i];
+    if (!guess || (typeof guess.taxonId !== "number" && typeof guess.text !== "string")) continue;
+    const correct = isCorrect(rounds[i].token, guess, mode);
+    if (correct) score++;
+    const answer = openAnswer(rounds[i].token);
+    if (answer) {
+      records.push(
+        recordGuess(mode, answer.taxonId, answer.scientificName, answer.commonName, correct),
+      );
+    }
   }
+  await Promise.all(records);
 
   const otherScore = isChallenger ? match.opponent_score : match.challenger_score;
   const update: Record<string, unknown> = {

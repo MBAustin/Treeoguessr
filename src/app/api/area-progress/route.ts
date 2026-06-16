@@ -1,9 +1,15 @@
 import type { NextRequest } from "next/server";
-import { buildRound, RoundError, type GameMode } from "@/lib/inat";
+import { getAreaPool, RoundError, type GameMode } from "@/lib/inat";
 import { getCorrectTaxa } from "@/lib/mastery";
 
 const MODES: GameMode[] = ["normal", "hard", "botanist"];
 
+/**
+ * "You've identified x of y species in this area" for the signed-in player and
+ * the given mode. y is the area's distinct research-grade plant species; x is how
+ * many of those they've correctly identified in this mode. Returns zeros for
+ * guests (tracking is signed-in only).
+ */
 export async function GET(request: NextRequest) {
   const sp = request.nextUrl.searchParams;
   const lat = Number(sp.get("lat"));
@@ -11,13 +17,6 @@ export async function GET(request: NextRequest) {
   const radius = Math.min(200, Math.max(1, Number(sp.get("radius")) || 25));
   const modeParam = sp.get("mode") as GameMode | null;
   const mode = modeParam && MODES.includes(modeParam) ? modeParam : "normal";
-  // The last couple of species shown, kept out of the next round so nothing
-  // repeats back-to-back. Species already mastered in this mode are read from
-  // the player's profile server-side instead of trusting the client.
-  const cooldown = (sp.get("cooldown") ?? "")
-    .split(",")
-    .map(Number)
-    .filter(Number.isFinite);
 
   if (
     !Number.isFinite(lat) ||
@@ -31,13 +30,16 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const correctTaxa = await getCorrectTaxa(mode);
-    const round = await buildRound(lat, lng, radius, mode, correctTaxa, cooldown);
-    return Response.json(round);
+    const [pool, correctTaxa] = await Promise.all([
+      getAreaPool(lat, lng, radius),
+      getCorrectTaxa(mode),
+    ]);
+    const guessed = correctTaxa.filter((id) => pool.ids.has(id)).length;
+    return Response.json({ guessed, total: pool.total });
   } catch (e) {
     if (e instanceof RoundError) {
       return Response.json({ error: e.message }, { status: e.status });
     }
-    return Response.json({ error: "Failed to build a round." }, { status: 500 });
+    return Response.json({ error: "Failed to load area progress." }, { status: 500 });
   }
 }

@@ -1,5 +1,9 @@
 import { openAnswer } from "@/lib/sign";
 import { matchesAnswer } from "@/lib/match";
+import { recordGuess } from "@/lib/mastery";
+import type { GameMode } from "@/lib/inat";
+
+const MODES: GameMode[] = ["normal", "hard", "botanist"];
 
 export async function POST(request: Request) {
   let body: { token?: string; taxonId?: number; text?: string; mode?: string };
@@ -29,6 +33,17 @@ export async function POST(request: Request) {
   } else {
     return Response.json({ error: "Provide a taxonId or text + mode." }, { status: 400 });
   }
+
+  // Record against the signed-in player's profile (no-op for guests). The mode
+  // determines which per-mode tally this counts toward.
+  const guessMode: GameMode = MODES.includes(mode as GameMode) ? (mode as GameMode) : "normal";
+  await recordGuess(
+    guessMode,
+    answer.taxonId,
+    answer.scientificName,
+    answer.commonName,
+    correct,
+  );
 
   return Response.json({
     correct,
