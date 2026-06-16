@@ -51,6 +51,9 @@ interface INatObservation {
     preferred_common_name?: string | null;
     // iNat rank level: species = 10, subspecies/variety/form < 10, genus = 20…
     rank_level?: number | null;
+    // Ancestor taxon ids ordered root→self; a longer shared prefix between two
+    // species means a more recent common ancestor (genus > family > order…).
+    ancestor_ids?: number[] | null;
   };
   photos?: INatPhoto[];
 }
@@ -116,6 +119,8 @@ interface AreaSpecies {
   taxonId: number;
   scientificName: string;
   commonName: string | null;
+  // Ancestor taxon ids (root→self), used to pick taxonomically close distractors.
+  ancestorIds: number[];
 }
 
 /** The full species universe for an area, from iNat's species_counts. */
@@ -177,6 +182,7 @@ async function fetchSpeciesPage(
       taxonId: t.id,
       scientificName: t.name,
       commonName: t.preferred_common_name ?? null,
+      ancestorIds: t.ancestor_ids ?? [],
     });
   }
   return { species, total: data.total_results ?? 0 };
@@ -301,6 +307,50 @@ async function collectQuestionsWithPhotos(
   return out.slice(0, n);
 }
 
+/** How many leading ancestor ids two species share — i.e. the depth of their
+ *  most recent common ancestor. Higher = more closely related. */
+function sharedAncestry(a: number[], b: number[]): number {
+  const n = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < n && a[i] === b[i]) i++;
+  return i;
+}
+
+// Distractors should share at least this many leading ancestors with the answer
+// — i.e. belong to the same broad group (mosses, ferns, conifers, grasses/other
+// monocots, broadleaf flowering plants…) rather than the same genus. This avoids
+// the giveaway where a moss photo is the only moss among the options, without
+// making every round a near-impossible same-genus quiz. It's a shared-prefix
+// count, not an exact rank, so it's approximate: raise it for harder (more
+// closely related) options, lower it for easier ones.
+const DISTRACTOR_MIN_SHARED = 5;
+
+/**
+ * Pick `n` distractor species in the same broad group as `question` (see
+ * DISTRACTOR_MIN_SHARED), chosen at random for variety. If the area doesn't hold
+ * enough same-group species, fall back to the next-closest ones so we always
+ * return `n`.
+ */
+function pickDistractors(question: AreaSpecies, pool: AreaSpecies[], n: number): AreaSpecies[] {
+  const others = pool.filter((p) => p.taxonId !== question.taxonId);
+
+  const sameGroup = shuffle(
+    others.filter(
+      (p) => sharedAncestry(question.ancestorIds, p.ancestorIds) >= DISTRACTOR_MIN_SHARED,
+    ),
+  );
+  if (sameGroup.length >= n) return sameGroup.slice(0, n);
+
+  // Thin on close relatives — top up with the next-closest species available.
+  const used = new Set(sameGroup.map((p) => p.taxonId));
+  const rest = others
+    .filter((p) => !used.has(p.taxonId))
+    .map((p) => ({ p, score: sharedAncestry(question.ancestorIds, p.ancestorIds), r: Math.random() }))
+    .sort((a, b) => b.score - a.score || a.r - b.r)
+    .map((s) => s.p);
+  return [...sameGroup, ...rest].slice(0, n);
+}
+
 /**
  * Build the photo/options/token for one round from a chosen `question` species
  * and its `photo`, drawing 3 distractors from the rest of `pool`. The shared core
@@ -312,7 +362,7 @@ function assembleRound(
   pool: AreaSpecies[],
   mode: GameMode,
 ): Omit<Round, "location"> {
-  const distractors = shuffle(pool.filter((p) => p.taxonId !== question.taxonId)).slice(0, 3);
+  const distractors = pickDistractors(question, pool, 3);
 
   const options = shuffle(
     [question, ...distractors].map<RoundOption>((p) => ({
