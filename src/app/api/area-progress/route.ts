@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { getAreaPool, RoundError, type GameMode } from "@/lib/inat";
 import { getCorrectTaxa } from "@/lib/mastery";
+import { groupsToTaxonFilter } from "@/lib/taxonGroups";
 
 const MODES: GameMode[] = ["normal", "hard", "botanist"];
 
@@ -17,6 +18,7 @@ export async function GET(request: NextRequest) {
   const radius = Math.min(200, Math.max(1, Number(sp.get("radius")) || 25));
   const modeParam = sp.get("mode") as GameMode | null;
   const mode = modeParam && MODES.includes(modeParam) ? modeParam : "normal";
+  const filter = groupsToTaxonFilter((sp.get("groups") ?? "").split(",").filter(Boolean));
 
   if (
     !Number.isFinite(lat) ||
@@ -31,7 +33,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const [pool, correctTaxa] = await Promise.all([
-      getAreaPool(lat, lng, radius),
+      getAreaPool(lat, lng, radius, filter),
       getCorrectTaxa(mode),
     ]);
     const guessed = correctTaxa.filter((id) => pool.ids.has(id)).length;

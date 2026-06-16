@@ -8,6 +8,7 @@ import AuthButton from "@/components/AuthButton";
 import RoundCard, { type GuessResult } from "@/components/RoundCard";
 import { getStats, saveResult, type Stats } from "@/lib/progress";
 import { useUser } from "@/lib/useUser";
+import { CATEGORIES, DEFAULT_KEYS, type Category } from "@/lib/taxonGroups";
 
 type Coords = { lat: number; lng: number };
 type GeoStatus = "idle" | "locating" | "ready" | "denied";
@@ -19,7 +20,7 @@ const LIFELINES = 3;
 const COOLDOWN = 2;
 
 const MODES: { id: GameMode; label: string; blurb: string }[] = [
-  { id: "normal", label: "Normal", blurb: "Pick the plant from 4 choices." },
+  { id: "normal", label: "Normal", blurb: "Pick the species from 4 choices." },
   { id: "hard", label: "Hard", blurb: "Type the common name. 3 lifelines reveal choices." },
   {
     id: "botanist",
@@ -33,17 +34,19 @@ async function fetchRound(
   radius: number,
   mode: GameMode,
   cooldown: number[],
+  groups: string[],
 ): Promise<Round> {
   const params = new URLSearchParams({
     lat: String(coords.lat),
     lng: String(coords.lng),
     radius: String(radius),
     mode,
+    groups: groups.join(","),
   });
   if (cooldown.length) params.set("cooldown", cooldown.join(","));
   const res = await fetch(`/api/round?${params}`);
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error ?? "Failed to load a plant.");
+  if (!res.ok) throw new Error(data.error ?? "Failed to load a round.");
   return data as Round;
 }
 
@@ -68,12 +71,14 @@ async function fetchAreaProgress(
   coords: Coords,
   radius: number,
   mode: GameMode,
+  groups: string[],
 ): Promise<AreaProgress> {
   const params = new URLSearchParams({
     lat: String(coords.lat),
     lng: String(coords.lng),
     radius: String(radius),
     mode,
+    groups: groups.join(","),
   });
   const res = await fetch(`/api/area-progress?${params}`);
   const data = await res.json();
@@ -88,6 +93,10 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [radius, setRadius] = useState(25);
   const [mode, setMode] = useState<GameMode>("normal");
+  // Which organism-type subgroups to include (keys). Default: all plants.
+  const [groups, setGroups] = useState<string[]>(DEFAULT_KEYS);
+  // Which category accordions are expanded (Plants open by default).
+  const [openCats, setOpenCats] = useState<string[]>(["plants"]);
 
   const [started, setStarted] = useState(false);
   const [gameOver, setGameOver] = useState(false);
@@ -139,8 +148,8 @@ export default function Home() {
     // cooldown is deliberately not in the key — it updates when a round is
     // answered, and we don't want that to refetch the round being viewed.
     // roundSeq drives refetches; the queryFn reads the latest cooldown.
-    queryKey: ["round", coords?.lat, coords?.lng, radius, mode, roundSeq],
-    queryFn: () => fetchRound(coords!, radius, mode, cooldown),
+    queryKey: ["round", coords?.lat, coords?.lng, radius, mode, groups.join(","), roundSeq],
+    queryFn: () => fetchRound(coords!, radius, mode, cooldown, groups),
     enabled: started && !gameOver && coords != null,
   });
 
@@ -150,11 +159,43 @@ export default function Home() {
   // (and a burst of iNat species_counts calls) for every intermediate value.
   const debouncedRadius = useDebouncedValue(radius, 500);
   const progressQuery = useQuery({
-    queryKey: ["area-progress", coords?.lat, coords?.lng, debouncedRadius, mode, user?.id, gameOver],
-    queryFn: () => fetchAreaProgress(coords!, debouncedRadius, mode),
+    queryKey: [
+      "area-progress",
+      coords?.lat,
+      coords?.lng,
+      debouncedRadius,
+      mode,
+      groups.join(","),
+      user?.id,
+      gameOver,
+    ],
+    queryFn: () => fetchAreaProgress(coords!, debouncedRadius, mode, groups),
     enabled: coords != null && user != null,
     staleTime: 60_000,
   });
+
+  function toggleGroup(key: string) {
+    setGroups((prev) =>
+      prev.includes(key)
+        ? prev.length > 1
+          ? prev.filter((k) => k !== key) // keep at least one type selected
+          : prev
+        : [...prev, key],
+    );
+  }
+
+  function setCategorySelected(cat: Category, on: boolean) {
+    const keys = cat.subgroups.map((s) => s.key);
+    setGroups((prev) => {
+      const without = prev.filter((k) => !keys.includes(k));
+      if (on) return [...without, ...keys];
+      return without.length > 0 ? without : prev; // keep at least one overall
+    });
+  }
+
+  function toggleCatOpen(key: string) {
+    setOpenCats((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  }
 
   function startGame() {
     setScore(0);
@@ -336,6 +377,77 @@ export default function Home() {
               <p className="mt-2 text-xs opacity-70">{MODES.find((m) => m.id === mode)!.blurb}</p>
             </div>
 
+            <div className="mt-4">
+              <span className="mb-1 block text-sm font-medium">Organism types</span>
+              <div className="flex flex-col rounded-lg border border-black/10 dark:border-white/15">
+                {CATEGORIES.map((cat) => {
+                  const subKeys = cat.subgroups.map((s) => s.key);
+                  const selectedCount = subKeys.filter((k) => groups.includes(k)).length;
+                  const all = selectedCount === subKeys.length;
+                  const none = selectedCount === 0;
+                  const open = openCats.includes(cat.key);
+                  return (
+                    <div
+                      key={cat.key}
+                      className="border-b border-black/5 last:border-0 dark:border-white/5"
+                    >
+                      <div className="flex items-center gap-2 px-2 py-2">
+                        <button
+                          type="button"
+                          onClick={() => setCategorySelected(cat, !all)}
+                          aria-label={`Toggle all ${cat.label}`}
+                          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded border text-xs leading-none ${
+                            none
+                              ? "border-black/25 dark:border-white/30"
+                              : "border-green-600 bg-green-600 text-white"
+                          } ${!all && !none ? "bg-green-600/50" : ""}`}
+                        >
+                          {all ? "✓" : none ? "" : "–"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => toggleCatOpen(cat.key)}
+                          className="flex flex-1 items-center justify-between text-left text-sm font-medium"
+                        >
+                          <span>
+                            {cat.emoji} {cat.label}
+                          </span>
+                          <span className="text-xs font-normal opacity-50">
+                            {selectedCount}/{subKeys.length} {open ? "▾" : "▸"}
+                          </span>
+                        </button>
+                      </div>
+                      {open && (
+                        <div className="flex flex-wrap gap-2 px-2 pb-2">
+                          {cat.subgroups.map((s) => {
+                            const on = groups.includes(s.key);
+                            return (
+                              <button
+                                key={s.key}
+                                type="button"
+                                onClick={() => toggleGroup(s.key)}
+                                aria-pressed={on}
+                                className={`rounded-full border px-3 py-1 text-sm transition ${
+                                  on
+                                    ? "border-green-600 bg-green-100 dark:bg-green-900/40"
+                                    : "border-black/15 opacity-50 hover:opacity-100 dark:border-white/20"
+                                }`}
+                              >
+                                {s.emoji} {s.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="mt-2 text-xs opacity-60">
+                Plants only by default. Trees fall under Broadleaf plants.
+              </p>
+            </div>
+
             {hasValidCoords && (
               <p className="mt-4 text-sm">
                 {user ? (
@@ -404,7 +516,7 @@ export default function Home() {
       {started && !gameOver && (
         <section>
           {roundQuery.isLoading && (
-            <p className="text-center text-sm opacity-70">Finding a plant near you…</p>
+            <p className="text-center text-sm opacity-70">Finding a species near you…</p>
           )}
           {roundQuery.isError && (
             <div className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
@@ -428,7 +540,7 @@ export default function Home() {
                   onClick={nextRound}
                   className="shrink-0 rounded-lg bg-green-600 px-4 py-2 font-semibold text-white transition hover:bg-green-700"
                 >
-                  {roundNumber >= TOTAL_ROUNDS ? "See results" : "Next plant →"}
+                  {roundNumber >= TOTAL_ROUNDS ? "See results" : "Next species →"}
                 </button>
               }
             />
@@ -437,7 +549,7 @@ export default function Home() {
       )}
 
       <footer className="mt-auto pt-4 text-center text-xs opacity-50">
-        Plant data &amp; photos from{" "}
+        Species data &amp; photos from{" "}
         <a href="https://www.inaturalist.org" className="underline">
           iNaturalist
         </a>{" "}

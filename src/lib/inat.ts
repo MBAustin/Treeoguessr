@@ -1,4 +1,5 @@
 import { sealAnswer } from "./sign";
+import { DEFAULT_FILTER, type TaxonFilter } from "./taxonGroups";
 
 const API = "https://api.inaturalist.org/v1/observations";
 
@@ -6,7 +7,7 @@ export type GameMode = "normal" | "hard" | "botanist";
 
 // iNaturalist asks API users to identify their app and stay within rate limits.
 // https://www.inaturalist.org/pages/api+recommended+practices
-const USER_AGENT = "Treeoguessr/0.1 (educational plant ID game)";
+const USER_AGENT = "Treeoguessr/0.1 (educational nature ID game)";
 
 export interface RoundOption {
   taxonId: number;
@@ -159,17 +160,21 @@ async function fetchSpeciesPage(
   rlng: number,
   radius: number,
   page: number,
+  filter: TaxonFilter,
 ): Promise<{ species: AreaSpecies[]; total: number }> {
   const params = new URLSearchParams({
     lat: String(rlat),
     lng: String(rlng),
     radius: String(radius),
-    iconic_taxa: "Plantae",
     quality_grade: "research",
     hrank: "species",
     per_page: String(PER_PAGE),
     page: String(page),
   });
+  // Restrict to the chosen organism groups: include these taxa, minus any in the
+  // exclude list (which expresses an "Other = parent minus named subgroups" set).
+  params.set("taxon_id", filter.include.join(","));
+  if (filter.exclude.length) params.set("without_taxon_id", filter.exclude.join(","));
   const res = await fetch(`${API}/species_counts?${params}`, {
     headers: API_HEADERS,
     cache: "no-store",
@@ -200,15 +205,20 @@ async function fetchSpeciesPage(
  * pages are best-effort so a transient hiccup just trims the tail rather than
  * failing the whole thing.
  */
-export async function getAreaPool(lat: number, lng: number, radius: number): Promise<AreaPool> {
+export async function getAreaPool(
+  lat: number,
+  lng: number,
+  radius: number,
+  filter: TaxonFilter = DEFAULT_FILTER,
+): Promise<AreaPool> {
   const rlat = Number(lat.toFixed(3));
   const rlng = Number(lng.toFixed(3));
-  const key = `${rlat},${rlng},${radius}`;
+  const key = `${rlat},${rlng},${radius},${filter.include.join(".")}-${filter.exclude.join(".")}`;
   const cached = areaPoolCache.get(key);
   if (cached && cached.expires > Date.now()) return cached.pool;
 
   // Page 1 gives the total (denominator) and the most-observed species.
-  const first = await fetchSpeciesPage(rlat, rlng, radius, 1);
+  const first = await fetchSpeciesPage(rlat, rlng, radius, 1, filter);
   const byId = new Map<number, AreaSpecies>();
   for (const s of first.species) byId.set(s.taxonId, s);
 
@@ -217,7 +227,7 @@ export async function getAreaPool(lat: number, lng: number, radius: number): Pro
     const pages = Array.from({ length: pageCount - 1 }, (_, i) => i + 2);
     const rest = await mapLimit(pages, FETCH_CONCURRENCY, async (page) => {
       try {
-        return (await fetchSpeciesPage(rlat, rlng, radius, page)).species;
+        return (await fetchSpeciesPage(rlat, rlng, radius, page, filter)).species;
       } catch {
         return [] as AreaSpecies[];
       }
@@ -409,16 +419,17 @@ export async function buildRound(
   mode: GameMode = "normal",
   correctTaxa: number[] = [],
   cooldown: number[] = [],
+  filter: TaxonFilter = DEFAULT_FILTER,
 ): Promise<Round> {
   // Round coordinates to ~110m: better cache hits and a little privacy.
   const rlat = Number(lat.toFixed(3));
   const rlng = Number(lng.toFixed(3));
 
-  const pool = await getAreaPool(rlat, rlng, radius);
+  const pool = await getAreaPool(rlat, rlng, radius, filter);
 
   if (pool.species.length < 4) {
     throw new RoundError(
-      "Not enough research-grade plants nearby. Try increasing the range.",
+      "Not enough research-grade species nearby. Try a wider range or more types.",
       404,
     );
   }
@@ -442,7 +453,7 @@ export async function buildRound(
   const picked = await collectQuestionsWithPhotos(available, 1, rlat, rlng, radius);
   if (picked.length === 0) {
     throw new RoundError(
-      "Couldn't find a usable plant photo nearby. Try increasing the range.",
+      "Couldn't find a usable photo nearby. Try increasing the range.",
       404,
     );
   }
@@ -486,7 +497,7 @@ async function pickMatchQuestions(
   );
   if (picked.length < n) {
     throw new RoundError(
-      "Not enough research-grade plants in one of the areas. Try a wider search range.",
+      "Not enough research-grade species in one of the areas. Try a wider search range.",
       404,
     );
   }

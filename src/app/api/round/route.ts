@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { buildRound, RoundError, type GameMode } from "@/lib/inat";
 import { getCorrectTaxa } from "@/lib/mastery";
+import { groupsToTaxonFilter } from "@/lib/taxonGroups";
 
 const MODES: GameMode[] = ["normal", "hard", "botanist"];
 
@@ -18,6 +19,8 @@ export async function GET(request: NextRequest) {
     .split(",")
     .map(Number)
     .filter(Number.isFinite);
+  // Selected organism-type group keys → an iNat include/exclude filter.
+  const filter = groupsToTaxonFilter((sp.get("groups") ?? "").split(",").filter(Boolean));
 
   if (
     !Number.isFinite(lat) ||
@@ -32,7 +35,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const correctTaxa = await getCorrectTaxa(mode);
-    const round = await buildRound(lat, lng, radius, mode, correctTaxa, cooldown);
+    const round = await buildRound(lat, lng, radius, mode, correctTaxa, cooldown, filter);
     return Response.json(round);
   } catch (e) {
     if (e instanceof RoundError) {

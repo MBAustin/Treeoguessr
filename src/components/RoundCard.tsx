@@ -130,7 +130,7 @@ export default function RoundCard({
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={photo.url}
-            alt="A plant observed near one of you — can you identify it?"
+            alt="An organism observed near you — can you identify it?"
             className="h-80 w-full object-contain"
           />
           {photos.length > 1 && (
