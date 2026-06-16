@@ -11,7 +11,7 @@ import type { GameMode } from "@/lib/inat";
 const MODE_LABELS: Record<GameMode, string> = {
   normal: "Normal",
   hard: "Hard",
-  botanist: "Botanist",
+  botanist: "Taxonomist",
 };
 
 export default function ProfilePage() {

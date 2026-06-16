@@ -3,12 +3,23 @@
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import type { GameMode, Round } from "@/lib/inat";
 import AuthButton from "@/components/AuthButton";
 import RoundCard, { type GuessResult } from "@/components/RoundCard";
 import { getStats, saveResult, type Stats } from "@/lib/progress";
 import { useUser } from "@/lib/useUser";
 import { CATEGORIES, DEFAULT_KEYS, type Category } from "@/lib/taxonGroups";
+
+// Leaflet touches `window`, so load the map client-side only.
+const LocationMap = dynamic(() => import("@/components/LocationMap"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-64 w-full items-center justify-center rounded-lg border border-black/10 text-sm opacity-60 dark:border-white/15">
+      Loading map…
+    </div>
+  ),
+});
 
 type Coords = { lat: number; lng: number };
 type GeoStatus = "idle" | "locating" | "ready" | "denied";
@@ -24,7 +35,7 @@ const MODES: { id: GameMode; label: string; blurb: string }[] = [
   { id: "hard", label: "Hard", blurb: "Type the common name. 3 lifelines reveal choices." },
   {
     id: "botanist",
-    label: "Botanist",
+    label: "Taxonomist",
     blurb: "Type the scientific name. 3 lifelines reveal choices.",
   },
 ];
@@ -112,6 +123,13 @@ export default function Home() {
   const [cooldown, setCooldown] = useState<number[]>([]);
 
   const { user } = useUser();
+
+  // Set location from the map (tap/drag/search), marking it as resolved.
+  const pickLocation = useCallback((c: Coords) => {
+    setCoords(c);
+    setGeoStatus("ready");
+    setGeoError(null);
+  }, []);
 
   const locate = useCallback(() => {
     if (typeof navigator === "undefined" || !("geolocation" in navigator)) {
@@ -246,36 +264,35 @@ export default function Home() {
 
   return (
     <main className="mx-auto flex w-full max-w-xl flex-1 flex-col gap-6 px-4 py-8">
-      <header className="flex items-start justify-between gap-2">
-        <h1 className="text-3xl font-bold tracking-tight text-green-700 dark:text-green-400">
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <h1 className="text-2xl font-bold tracking-tight text-green-700 dark:text-green-400">
           🌿 Treeoguessr
         </h1>
-        <div className="flex flex-col items-end gap-1">
-          <div className="flex items-center gap-3">
-            <Link
-              href="/profile"
-              className="text-sm font-medium text-green-700 underline-offset-2 hover:underline dark:text-green-400"
-            >
-              👤 Profile
-            </Link>
-            <Link
-              href="/vs"
-              className="text-sm font-medium text-green-700 underline-offset-2 hover:underline dark:text-green-400"
-            >
-              ⚔️ Play a friend
-            </Link>
-            <AuthButton />
-          </div>
-          {started && !gameOver && (
-            <div className="text-right text-sm">
-              <span className="font-medium">
-                Round {roundNumber}/{TOTAL_ROUNDS}
-              </span>
-              <span className="ml-2 tabular-nums opacity-70">Score {score}</span>
-            </div>
-          )}
-        </div>
+        <nav className="flex items-center gap-1 text-sm">
+          <Link
+            href="/profile"
+            className="whitespace-nowrap rounded-md px-2.5 py-1.5 font-medium text-green-700 transition hover:bg-green-100/70 dark:text-green-400 dark:hover:bg-green-950/40"
+          >
+            Profile
+          </Link>
+          <Link
+            href="/vs"
+            className="whitespace-nowrap rounded-md px-2.5 py-1.5 font-medium text-green-700 transition hover:bg-green-100/70 dark:text-green-400 dark:hover:bg-green-950/40"
+          >
+            Play a friend
+          </Link>
+          <AuthButton />
+        </nav>
       </header>
+
+      {started && !gameOver && (
+        <div className="flex items-center justify-between rounded-lg border border-black/10 px-3 py-2 text-sm dark:border-white/15">
+          <span className="font-medium">
+            Round {roundNumber} / {TOTAL_ROUNDS}
+          </span>
+          <span className="tabular-nums opacity-70">Score {score}</span>
+        </div>
+      )}
 
       {/* Setup panel — full before playing, collapsed behind a toggle once started */}
       <section className="rounded-xl border border-black/10 dark:border-white/15">
@@ -314,7 +331,13 @@ export default function Home() {
               )}
             </div>
 
-            <div className="mt-3 grid grid-cols-2 gap-2">
+            <div className="mt-3">
+              <LocationMap coords={coords} radiusKm={radius} onChange={pickLocation} />
+            </div>
+
+            <details className="mt-3">
+              <summary className="cursor-pointer text-xs opacity-60">Enter coordinates manually</summary>
+              <div className="mt-2 grid grid-cols-2 gap-2">
               <label className="text-xs opacity-70">
                 Latitude
                 <input
@@ -343,7 +366,8 @@ export default function Home() {
                   }
                 />
               </label>
-            </div>
+              </div>
+            </details>
 
             <label className="mt-4 mb-1 block text-sm font-medium">
               Search range: {radius} km
@@ -443,9 +467,6 @@ export default function Home() {
                   );
                 })}
               </div>
-              <p className="mt-2 text-xs opacity-60">
-                Plants only by default. Trees fall under Broadleaf plants.
-              </p>
             </div>
 
             {hasValidCoords && (

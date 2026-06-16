@@ -37,15 +37,16 @@ export default function AuthButton() {
     );
   }
 
-  const name =
+  const fullName =
     (user.user_metadata?.full_name as string | undefined) ?? user.email ?? "Signed in";
+  const firstName = String(fullName).split(/[\s@]/)[0];
 
   return (
-    <div className="flex items-center gap-2 text-sm">
-      <span className="max-w-[10rem] truncate opacity-70">{name}</span>
+    <div className="flex items-center gap-2">
+      <span className="hidden max-w-[8rem] truncate text-sm opacity-70 sm:inline">{firstName}</span>
       <button
         onClick={() => sb.auth.signOut()}
-        className="rounded-md border border-black/15 px-2 py-1 text-xs font-medium transition hover:border-red-400 dark:border-white/20"
+        className="whitespace-nowrap rounded-md border border-black/15 px-2.5 py-1.5 text-xs font-medium transition hover:border-red-400 hover:text-red-600 dark:border-white/20 dark:hover:text-red-400"
       >
         Sign out
       </button>

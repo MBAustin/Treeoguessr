@@ -341,19 +341,25 @@ function sharedAncestry(a: number[], b: number[]): number {
 // closely related) options, lower it for easier ones.
 const DISTRACTOR_MIN_SHARED = 5;
 
+// Mammalia. Mammals are far easier to tell apart at the broad-group level (a seal
+// vs a squirrel is no contest), so for them we want the *closest* relatives
+// instead — other seals/sea lions, other mice, etc. Using Infinity here means no
+// species clears the "same broad group" bar, so selection always falls through to
+// the closest-by-ancestry list below.
+const MAMMALIA = 40151;
+
 /**
- * Pick `n` distractor species in the same broad group as `question` (see
- * DISTRACTOR_MIN_SHARED), chosen at random for variety. If the area doesn't hold
- * enough same-group species, fall back to the next-closest ones so we always
- * return `n`.
+ * Pick `n` distractor species for `question`. For most taxa that means the same
+ * broad group (see DISTRACTOR_MIN_SHARED), chosen at random for variety; for
+ * mammals it means the taxonomically closest species. Either way, if the area is
+ * thin on relatives we top up with the next-closest so we always return `n`.
  */
 function pickDistractors(question: AreaSpecies, pool: AreaSpecies[], n: number): AreaSpecies[] {
   const others = pool.filter((p) => p.taxonId !== question.taxonId);
 
+  const minShared = question.ancestorIds.includes(MAMMALIA) ? Infinity : DISTRACTOR_MIN_SHARED;
   const sameGroup = shuffle(
-    others.filter(
-      (p) => sharedAncestry(question.ancestorIds, p.ancestorIds) >= DISTRACTOR_MIN_SHARED,
-    ),
+    others.filter((p) => sharedAncestry(question.ancestorIds, p.ancestorIds) >= minShared),
   );
   if (sameGroup.length >= n) return sameGroup.slice(0, n);
 

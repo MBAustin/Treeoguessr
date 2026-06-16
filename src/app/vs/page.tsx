@@ -31,7 +31,7 @@ const VS_RADIUS_KM = 25;
 const MODES: { id: GameMode; label: string }[] = [
   { id: "normal", label: "Normal" },
   { id: "hard", label: "Hard" },
-  { id: "botanist", label: "Botanist" },
+  { id: "botanist", label: "Taxonomist" },
 ];
 
 type Coords = { lat: number; lng: number };
