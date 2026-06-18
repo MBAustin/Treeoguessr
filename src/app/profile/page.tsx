@@ -85,7 +85,10 @@ export default function ProfilePage() {
 
           {scores && (
             <div className="grid grid-cols-3 gap-3">
-              <Stat label={`Best / ${TOTAL}`} value={scores.best} />
+              <Stat
+                label="Best"
+                value={scores.best > TOTAL ? `${scores.best} 🔥` : `${scores.best} / ${TOTAL}`}
+              />
               <Stat label="Average" value={scores.games ? scores.average.toFixed(1) : "—"} />
               <Stat label="Games" value={scores.games} />
             </div>

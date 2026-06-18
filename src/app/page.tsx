@@ -117,6 +117,10 @@ export default function Home() {
   // Every species shown this game, so none repeats within a single game. (Across
   // games, repeats are avoided at the photo level server-side, not the species.)
   const [seenTaxa, setSeenTaxa] = useState<number[]>([]);
+  // A perfect standard game flips into "shoot till you miss": bonus rounds past
+  // TOTAL_ROUNDS that end on the first wrong answer, so scores can exceed it.
+  const [suddenDeath, setSuddenDeath] = useState(false);
+  const [lastCorrect, setLastCorrect] = useState<boolean | null>(null);
 
   const { user } = useUser();
 
@@ -217,6 +221,8 @@ export default function Home() {
     setRoundNumber(1);
     setLifelinesLeft(LIFELINES);
     setSeenTaxa([]);
+    setSuddenDeath(false);
+    setLastCorrect(null);
     setGameOver(false);
     setStarted(true);
     setSettingsOpen(false);
@@ -230,8 +236,25 @@ export default function Home() {
   }
 
   function nextRound() {
+    // Sudden death: any miss ends the run.
+    if (suddenDeath) {
+      if (lastCorrect === false) {
+        void finishGame();
+        return;
+      }
+      setRoundNumber((n) => n + 1);
+      setRoundSeq((n) => n + 1);
+      return;
+    }
+    // End of the standard game: a perfect score kicks off sudden death; otherwise finish.
     if (roundNumber >= TOTAL_ROUNDS) {
-      void finishGame();
+      if (score >= TOTAL_ROUNDS) {
+        setSuddenDeath(true);
+        setRoundNumber((n) => n + 1);
+        setRoundSeq((n) => n + 1);
+      } else {
+        void finishGame();
+      }
       return;
     }
     setRoundNumber((n) => n + 1);
@@ -240,6 +263,7 @@ export default function Home() {
 
   function onAnswered(result: GuessResult) {
     setScore((s) => s + (result.correct ? 1 : 0));
+    setLastCorrect(result.correct);
     // Remember this species so it can't recur later in the same game. The guess
     // itself is recorded on the player's profile server-side.
     setSeenTaxa((prev) =>
@@ -248,6 +272,12 @@ export default function Home() {
   }
 
   const round = roundQuery.data;
+  // After the current (answered) round, does advancing end the game? In sudden
+  // death a miss ends it; in the standard game the last round ends it unless the
+  // score is perfect (which starts sudden death).
+  const willEnd = suddenDeath
+    ? lastCorrect === false
+    : roundNumber >= TOTAL_ROUNDS && score < TOTAL_ROUNDS;
 
   const hasValidCoords =
     coords != null &&
@@ -286,7 +316,13 @@ export default function Home() {
       {started && !gameOver && (
         <div className="flex items-center justify-between rounded-lg border border-black/10 px-3 py-2 text-sm dark:border-white/15">
           <span className="font-medium">
-            Round {roundNumber} / {TOTAL_ROUNDS}
+            {suddenDeath ? (
+              <span className="text-orange-600 dark:text-orange-400">
+                🔥 Sudden death · bonus {roundNumber - TOTAL_ROUNDS}
+              </span>
+            ) : (
+              `Round ${roundNumber} / ${TOTAL_ROUNDS}`
+            )}
           </span>
           <span className="tabular-nums opacity-70">Score {score}</span>
         </div>
@@ -510,15 +546,23 @@ export default function Home() {
         <section className="rounded-xl border border-black/10 p-6 text-center dark:border-white/15">
           <h2 className="text-xl font-bold">Game over 🌱</h2>
           <p className="mt-2 text-3xl font-bold tabular-nums text-green-700 dark:text-green-400">
-            {score}/{TOTAL_ROUNDS}
+            {score >= TOTAL_ROUNDS ? `${score} 🔥` : `${score}/${TOTAL_ROUNDS}`}
           </p>
+          {score >= TOTAL_ROUNDS && (
+            <p className="mt-1 text-sm font-medium text-orange-600 dark:text-orange-400">
+              Perfect run{score > TOTAL_ROUNDS ? ` + ${score - TOTAL_ROUNDS} bonus` : ""}! 🌟
+            </p>
+          )}
           <p className="mt-1 text-sm opacity-70">
             {modeLabel} mode · {radius} km
           </p>
           {stats && (
             <p className="mt-3 text-sm">
-              Best <span className="font-semibold">{stats.best}/{TOTAL_ROUNDS}</span> ·{" "}
-              {stats.games} {stats.games === 1 ? "game" : "games"} played
+              Best{" "}
+              <span className="font-semibold">
+                {stats.best > TOTAL_ROUNDS ? `${stats.best} 🔥` : `${stats.best}/${TOTAL_ROUNDS}`}
+              </span>{" "}
+              · {stats.games} {stats.games === 1 ? "game" : "games"} played
             </p>
           )}
           <button
@@ -559,7 +603,11 @@ export default function Home() {
                   onClick={nextRound}
                   className="shrink-0 rounded-lg bg-green-600 px-4 py-2 font-semibold text-white transition hover:bg-green-700"
                 >
-                  {roundNumber >= TOTAL_ROUNDS ? "See results" : "Next species →"}
+                  {willEnd
+                    ? "See results"
+                    : suddenDeath || roundNumber >= TOTAL_ROUNDS
+                      ? "🔥 Keep going"
+                      : "Next species →"}
                 </button>
               }
             />
