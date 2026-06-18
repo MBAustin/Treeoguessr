@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { getAreaPool, RoundError, type GameMode } from "@/lib/inat";
+import { getAreaPool, areaIdentified, RoundError, type GameMode } from "@/lib/inat";
 import { getCorrectTaxa } from "@/lib/mastery";
 import { groupsToTaxonFilter } from "@/lib/taxonGroups";
 
@@ -36,8 +36,8 @@ export async function GET(request: NextRequest) {
       getAreaPool(lat, lng, radius, filter),
       getCorrectTaxa(mode),
     ]);
-    const guessed = correctTaxa.filter((id) => pool.ids.has(id)).length;
-    return Response.json({ guessed, total: pool.total });
+    // Counts only species the current mode can quiz (common-named for Normal/Hard).
+    return Response.json(areaIdentified(pool, correctTaxa, mode));
   } catch (e) {
     if (e instanceof RoundError) {
       return Response.json({ error: e.message }, { status: e.status });

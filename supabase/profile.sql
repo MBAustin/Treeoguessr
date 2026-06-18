@@ -5,9 +5,9 @@
 -- ---------------------------------------------------------------------------
 -- species_guesses: one row per (player, mode, taxon), accumulating how many
 -- times that player has guessed that species right or wrong in that mode.
--- Drives the Profile page totals, the "x of y species in this area" counter,
--- and round selection (a species mastered in a mode is hidden until the area
--- is exhausted; a missed one stays in the pool).
+-- Drives the Profile page totals/most-identified lists and the "x of y species
+-- in this area" counter. (Repeats are avoided at the photo level via seen_photos,
+-- not by hiding species, so this no longer gates round selection.)
 -- ---------------------------------------------------------------------------
 create table if not exists public.species_guesses (
   user_id         uuid not null references auth.users (id) on delete cascade default auth.uid(),
@@ -24,14 +24,18 @@ create table if not exists public.species_guesses (
 
 alter table public.species_guesses enable row level security;
 
+-- drop-then-create so the whole file is safe to re-run (create policy isn't idempotent).
+drop policy if exists "select own species_guesses" on public.species_guesses;
 create policy "select own species_guesses"
   on public.species_guesses for select
   using (auth.uid() = user_id);
 
+drop policy if exists "insert own species_guesses" on public.species_guesses;
 create policy "insert own species_guesses"
   on public.species_guesses for insert
   with check (auth.uid() = user_id);
 
+drop policy if exists "update own species_guesses" on public.species_guesses;
 create policy "update own species_guesses"
   on public.species_guesses for update
   using (auth.uid() = user_id)
@@ -66,3 +70,44 @@ as $$
     common_name     = coalesce(excluded.common_name, public.species_guesses.common_name),
     updated_at      = now();
 $$;
+
+-- ---------------------------------------------------------------------------
+-- seen_photos: which iNaturalist photos a player has already been shown, so the
+-- game can keep surfacing the same species across games but never repeat the same
+-- photo (tracked per photo, since one observation can have several). One row per
+-- (player, photo).
+-- ---------------------------------------------------------------------------
+create table if not exists public.seen_photos (
+  user_id    uuid not null references auth.users (id) on delete cascade default auth.uid(),
+  photo_id   bigint not null,
+  seen_at    timestamptz not null default now(),
+  primary key (user_id, photo_id)
+);
+
+-- Migrate installs created before per-photo tracking (column was observation_id).
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'seen_photos' and column_name = 'observation_id'
+  ) then
+    alter table public.seen_photos rename column observation_id to photo_id;
+  end if;
+end $$;
+
+alter table public.seen_photos enable row level security;
+
+drop policy if exists "select own seen_photos" on public.seen_photos;
+create policy "select own seen_photos"
+  on public.seen_photos for select
+  using (auth.uid() = user_id);
+
+drop policy if exists "insert own seen_photos" on public.seen_photos;
+create policy "insert own seen_photos"
+  on public.seen_photos for insert
+  with check (auth.uid() = user_id);
+
+drop policy if exists "delete own seen_photos" on public.seen_photos;
+create policy "delete own seen_photos"
+  on public.seen_photos for delete
+  using (auth.uid() = user_id);

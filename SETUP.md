@@ -7,8 +7,9 @@ once the Supabase env vars are present. Do the steps in order.
 1. Create a project at https://supabase.com (free tier is plenty).
 2. **SQL Editor → New query**, paste the contents of [`supabase/schema.sql`](supabase/schema.sql), Run.
    For VS mode (usernames, friends, challenges), also run [`supabase/vs.sql`](supabase/vs.sql).
-   For profiles (per-mode species mastery, the "x of y species" counter), also
-   run [`supabase/profile.sql`](supabase/profile.sql).
+   For profiles (per-mode species mastery, the "x of y species" counter, and
+   seen-photo tracking), also run [`supabase/profile.sql`](supabase/profile.sql).
+   It's safe to re-run after updates (it's idempotent).
 3. **Project Settings → API**, copy:
    - **Project URL** → `NEXT_PUBLIC_SUPABASE_URL`
    - **anon / public** key (newer dashboards call it **Publishable**) → `NEXT_PUBLIC_SUPABASE_ANON_KEY`

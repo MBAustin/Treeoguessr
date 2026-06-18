@@ -43,6 +43,7 @@ export class RoundError extends Error {
 }
 
 interface INatPhoto {
+  id?: number;
   url?: string;
   attribution?: string;
   license_code?: string | null;
@@ -87,6 +88,15 @@ function shuffle<T>(arr: T[]): T[] {
   return arr;
 }
 
+/** Order items by weighted random sampling — higher weight ⇒ likelier to come
+ *  first (Efraimidis–Spirakis). Weight 0 items still appear, just usually last. */
+function weightedOrder<T>(items: T[], weight: (item: T) => number): T[] {
+  return items
+    .map((item) => ({ item, key: Math.random() ** (1 / Math.max(weight(item), 1e-6)) }))
+    .sort((a, b) => b.key - a.key)
+    .map((x) => x.item);
+}
+
 /** Upgrade an iNaturalist thumbnail URL to a larger display size. */
 function toLarge(url: string): string {
   return url.replace(/\/square\.(\w+)/, "/large.$1");
@@ -111,12 +121,24 @@ async function mapLimit<T, R>(
   return results;
 }
 
-/** One photo for a round — everything the photo panel needs. */
+/** One photo for a round — everything the photo panel needs, plus the iNat photo
+ *  id used to avoid repeating photos a player has already seen. */
 interface PoolPhoto {
   photoUrl: string;
   attribution: string;
   licenseCode: string | null;
   observationUrl: string;
+  photoId: number;
+}
+
+/**
+ * Per-player record of which photos have already been shown, so the same species
+ * can recur across games without repeating a photo. Implemented over Supabase by
+ * the round route; absent (guest) means no cross-game memory.
+ */
+export interface PhotoStore {
+  getSeen: (photoIds: number[]) => Promise<Set<number>>;
+  recordSeen: (photoIds: number[]) => Promise<void>;
 }
 
 /** One distinct species in an area (name only; its photo is fetched on demand). */
@@ -129,10 +151,34 @@ interface AreaSpecies {
 }
 
 /** The full species universe for an area, from iNat's species_counts. */
-interface AreaPool {
+export interface AreaPool {
   total: number; // true distinct-species count (the "of y" denominator)
   species: AreaSpecies[]; // every species we paged through (question + distractor pool)
   ids: Set<number>; // taxon ids of `species`, for the "x identified" intersection
+}
+
+/** Normal and Hard rely on recognizable names; Taxonomist (internal id `botanist`)
+ *  asks for the scientific name, so it allows species that have no common name. */
+function requireCommonName(mode: GameMode): boolean {
+  return mode !== "botanist";
+}
+
+/**
+ * "x of y" for the area counter, respecting the mode's common-name requirement
+ * so the denominator matches the species that mode can actually quiz.
+ */
+export function areaIdentified(
+  pool: AreaPool,
+  correctTaxa: number[],
+  mode: GameMode,
+): { guessed: number; total: number } {
+  const species = requireCommonName(mode)
+    ? pool.species.filter((s) => s.commonName)
+    : pool.species;
+  const ids = new Set(species.map((s) => s.taxonId));
+  let guessed = 0;
+  for (const id of new Set(correctTaxa)) if (ids.has(id)) guessed++;
+  return { guessed, total: species.length };
 }
 
 const PER_PAGE = 200;
@@ -148,12 +194,16 @@ const FETCH_CONCURRENCY = 5;
 const AREA_TTL_MS = 60 * 60 * 1000;
 const areaPoolCache = new Map<string, { pool: AreaPool; expires: number }>();
 
-// When fetching question photos, look at this many recent local observations of
-// the species — gives variety without a deep crawl, and the taxon filter keeps
-// the result set tiny (well under the 10k page ceiling).
-const PHOTO_CANDIDATES = 30;
-// How many distinct local photos to surface per question, for the carousel.
-const MAX_PHOTOS_PER_ROUND = 6;
+// Photos shown per question. Two when available, one when that's all that's left.
+const MAX_PHOTOS_PER_ROUND = 2;
+// We page through ~all local research-grade observations of a species (so every
+// available photo is reachable over time), bounded for safety. A single species
+// in one area rarely exceeds a few hundred.
+const PHOTO_PER_PAGE = 200;
+const PHOTO_PAGE_CAP = 15;
+const PHOTO_TTL_MS = 30 * 60 * 1000;
+// Candidate photos per species+area, cached so we don't re-crawl each round.
+const photoCache = new Map<string, { photos: PoolPhoto[]; expires: number }>();
 
 async function fetchSpeciesPage(
   rlat: number,
@@ -245,10 +295,10 @@ export async function getAreaPool(
 }
 
 /**
- * Up to MAX_PHOTOS_PER_ROUND local, research-grade, CC-licensed photos of one
- * species near (rlat,rlng), each from a different observation — empty if the
- * species has none nearby. Filtering by taxon keeps this to a single small
- * request that sidesteps the 10k observation-pagination ceiling.
+ * All local, research-grade, CC-licensed photos of one species near (rlat,rlng),
+ * one per observation — paged through up to PHOTO_PAGE_CAP so every available
+ * photo is reachable over time, and cached per species+area. Filtering by taxon
+ * keeps each page small and sidesteps the 10k observation-pagination ceiling.
  */
 async function fetchLocalPhotos(
   taxonId: number,
@@ -256,50 +306,95 @@ async function fetchLocalPhotos(
   rlng: number,
   radius: number,
 ): Promise<PoolPhoto[]> {
-  const params = new URLSearchParams({
-    taxon_id: String(taxonId),
-    lat: String(rlat),
-    lng: String(rlng),
-    radius: String(radius),
-    quality_grade: "research",
-    photos: "true",
-    photo_license: PHOTO_LICENSES,
-    per_page: String(PHOTO_CANDIDATES),
-    order_by: "created_at",
-    order: "desc",
-  });
-  let results: INatObservation[];
-  try {
+  const key = `${taxonId},${rlat},${rlng},${radius}`;
+  const cached = photoCache.get(key);
+  if (cached && cached.expires > Date.now()) return cached.photos;
+
+  const fetchPage = async (page: number): Promise<{ photos: PoolPhoto[]; total: number }> => {
+    const params = new URLSearchParams({
+      taxon_id: String(taxonId),
+      lat: String(rlat),
+      lng: String(rlng),
+      radius: String(radius),
+      quality_grade: "research",
+      photos: "true",
+      photo_license: PHOTO_LICENSES,
+      per_page: String(PHOTO_PER_PAGE),
+      page: String(page),
+      order_by: "created_at",
+      order: "desc",
+    });
     const res = await fetch(`${API}?${params}`, { headers: API_HEADERS, cache: "no-store" });
-    if (!res.ok) return [];
-    results = ((await res.json()) as { results?: INatObservation[] }).results ?? [];
+    if (!res.ok) throw new RoundError("iNaturalist API is unavailable right now.", 502);
+    const data = (await res.json()) as { results?: INatObservation[]; total_results?: number };
+    const photos: PoolPhoto[] = [];
+    for (const o of data.results ?? []) {
+      const observationUrl = `https://www.inaturalist.org/observations/${o.id}`;
+      // Every CC-licensed photo on the observation — some carry several angles of
+      // the same specimen, each usable as a distinct question photo. (A matched
+      // obs may also carry all-rights-reserved photos, which we skip.)
+      for (const photo of o.photos ?? []) {
+        if (!photo.url || typeof photo.id !== "number") continue;
+        if (!photo.license_code || !ALLOWED_LICENSE.has(photo.license_code)) continue;
+        photos.push({
+          photoUrl: toLarge(photo.url),
+          attribution: photo.attribution ?? "",
+          licenseCode: photo.license_code,
+          observationUrl,
+          photoId: photo.id,
+        });
+      }
+    }
+    return { photos, total: data.total_results ?? 0 };
+  };
+
+  let photos: PoolPhoto[];
+  try {
+    const first = await fetchPage(1);
+    photos = [...first.photos];
+    const pageCount = Math.min(PHOTO_PAGE_CAP, Math.ceil(first.total / PHOTO_PER_PAGE));
+    if (pageCount > 1) {
+      const rest = await mapLimit(
+        Array.from({ length: pageCount - 1 }, (_, i) => i + 2),
+        FETCH_CONCURRENCY,
+        async (page) => {
+          try {
+            return (await fetchPage(page)).photos;
+          } catch {
+            return [] as PoolPhoto[];
+          }
+        },
+      );
+      for (const p of rest) photos.push(...p);
+    }
   } catch {
     return [];
   }
 
-  // One CC-licensed photo per observation (the matched obs may also carry
-  // all-rights-reserved photos), then a random subset for the carousel.
-  const photos: PoolPhoto[] = [];
-  for (const o of results) {
-    const photo = (o.photos ?? []).find(
-      (p) => p.url && p.license_code && ALLOWED_LICENSE.has(p.license_code),
-    );
-    if (!photo?.url) continue;
-    photos.push({
-      photoUrl: toLarge(photo.url),
-      attribution: photo.attribution ?? "",
-      licenseCode: photo.license_code ?? null,
-      observationUrl: `https://www.inaturalist.org/observations/${o.id}`,
-    });
-  }
-  return shuffle(photos).slice(0, MAX_PHOTOS_PER_ROUND);
+  photoCache.set(key, { photos, expires: Date.now() + PHOTO_TTL_MS });
+  return photos;
 }
 
 /**
- * Pick up to `n` distinct question species from `candidates`, each paired with
- * its fetched local photos. Walks the (shuffled) candidates with bounded
- * concurrency, skipping any species that has no usable local photo, and stops as
- * soon as `n` are found — so the common case costs ~`n` photo requests.
+ * Choose up to MAX_PHOTOS_PER_ROUND photos from a species' candidate photos,
+ * preferring observations the player hasn't seen (via `store`) and reusing seen
+ * ones only when nothing fresh remains. Records the chosen photos as seen.
+ */
+async function selectRoundPhotos(candidates: PoolPhoto[], store?: PhotoStore): Promise<PoolPhoto[]> {
+  if (candidates.length === 0) return [];
+  const seen = store ? await store.getSeen(candidates.map((p) => p.photoId)) : new Set<number>();
+  const unseen = shuffle(candidates.filter((p) => !seen.has(p.photoId)));
+  const reused = shuffle(candidates.filter((p) => seen.has(p.photoId)));
+  const chosen = [...unseen, ...reused].slice(0, MAX_PHOTOS_PER_ROUND);
+  if (store && chosen.length) await store.recordSeen(chosen.map((p) => p.photoId));
+  return chosen;
+}
+
+/**
+ * Pick up to `n` distinct question species from `candidates` (taken in the order
+ * given — callers pre-order for randomness/preference), each paired with its
+ * fetched local photos. Walks with bounded concurrency, skipping any species with
+ * no usable local photo, and stops as soon as `n` are found.
  */
 async function collectQuestionsWithPhotos(
   candidates: AreaSpecies[],
@@ -308,13 +403,12 @@ async function collectQuestionsWithPhotos(
   rlng: number,
   radius: number,
 ): Promise<{ species: AreaSpecies; photos: PoolPhoto[] }[]> {
-  const shuffled = shuffle([...candidates]);
   const out: { species: AreaSpecies; photos: PoolPhoto[] }[] = [];
   let next = 0;
-  const workers = Math.min(FETCH_CONCURRENCY, Math.max(1, n), shuffled.length);
+  const workers = Math.min(FETCH_CONCURRENCY, Math.max(1, n), candidates.length);
   async function worker() {
-    while (out.length < n && next < shuffled.length) {
-      const species = shuffled[next++];
+    while (out.length < n && next < candidates.length) {
+      const species = candidates[next++];
       const photos = await fetchLocalPhotos(species.taxonId, rlat, rlng, radius);
       if (photos.length > 0 && out.length < n) out.push({ species, photos });
     }
@@ -412,20 +506,25 @@ function assembleRound(
   };
 }
 
+// Species seen in recent games are this many times less likely to be the
+// question than fresh ones — a soft nudge toward variety, never a hard exclusion.
+const RECENT_WEIGHT = 0.1;
+
 /**
- * Build one round near (lat,lng). `correctTaxa` are species the player has
- * already mastered in this mode — hidden until the area is exhausted. `cooldown`
- * are the last couple of species shown, kept out for a round or two so nothing
- * repeats back-to-back (a missed species can still return after the cooldown).
+ * Build one round near (lat,lng). `seen` are taxa already shown *this game*, which
+ * are never repeated. `recentTaxa` are species seen in recent games, softly
+ * de-prioritized for variety. `filter` restricts the organism groups. `store`
+ * lets a signed-in player avoid photos they've already been shown in earlier games.
  */
 export async function buildRound(
   lat: number,
   lng: number,
   radius: number,
   mode: GameMode = "normal",
-  correctTaxa: number[] = [],
-  cooldown: number[] = [],
+  seen: number[] = [],
+  recentTaxa: number[] = [],
   filter: TaxonFilter = DEFAULT_FILTER,
+  store?: PhotoStore,
 ): Promise<Round> {
   // Round coordinates to ~110m: better cache hits and a little privacy.
   const rlat = Number(lat.toFixed(3));
@@ -433,39 +532,37 @@ export async function buildRound(
 
   const pool = await getAreaPool(rlat, rlng, radius, filter);
 
-  if (pool.species.length < 4) {
+  // Normal/Hard only quiz species with a common name; Taxonomist uses all.
+  const playable = requireCommonName(mode)
+    ? pool.species.filter((p) => p.commonName)
+    : pool.species;
+
+  if (playable.length < 4) {
     throw new RoundError(
       "Not enough research-grade species nearby. Try a wider range or more types.",
       404,
     );
   }
 
-  // Hide species already mastered in this mode. Only once the area's unguessed
-  // species are exhausted do we fall back to the full pool (allowing a repeat).
-  const correctSet = new Set(correctTaxa);
-  let candidates = pool.species.filter((p) => !correctSet.has(p.taxonId));
-  // Hard mode asks for the common name, so prefer a question that has one.
-  if (mode === "hard" && candidates.some((p) => p.commonName)) {
-    candidates = candidates.filter((p) => p.commonName);
-  }
-  if (candidates.length === 0) candidates = pool.species;
+  // Never repeat a species already shown this game; relax only if that empties
+  // the pool (the area has fewer species than the game is long).
+  const seenSet = new Set(seen);
+  const fresh = playable.filter((p) => !seenSet.has(p.taxonId));
+  const available = fresh.length > 0 ? fresh : playable;
 
-  // Keep the last couple of shown species out so nothing repeats immediately;
-  // relax if that would leave nothing to ask.
-  const cooldownSet = new Set(cooldown);
-  const fresh = candidates.filter((p) => !cooldownSet.has(p.taxonId));
-  const available = fresh.length > 0 ? fresh : candidates;
+  // Order by weighted random, softly de-prioritizing species seen in recent games
+  // so play spreads across the area's species over time without ever hard-excluding.
+  const recentSet = new Set(recentTaxa);
+  const ordered = weightedOrder(available, (p) => (recentSet.has(p.taxonId) ? RECENT_WEIGHT : 1));
 
-  const picked = await collectQuestionsWithPhotos(available, 1, rlat, rlng, radius);
+  const picked = await collectQuestionsWithPhotos(ordered, 1, rlat, rlng, radius);
   if (picked.length === 0) {
-    throw new RoundError(
-      "Couldn't find a usable photo nearby. Try increasing the range.",
-      404,
-    );
+    throw new RoundError("Couldn't find a usable photo nearby. Try increasing the range.", 404);
   }
 
+  const photos = await selectRoundPhotos(picked[0].photos, store);
   return {
-    ...assembleRound(picked[0].species, picked[0].photos, pool.species, mode),
+    ...assembleRound(picked[0].species, photos, playable, mode),
     location: { lat: rlat, lng: rlng, radius },
   };
 }
@@ -481,21 +578,15 @@ export interface MatchRound extends Omit<Round, "location"> {
   owner: "challenger" | "opponent";
 }
 
-/** Pick `n` question species (with photos) from a location's pool, preferring
- *  ones with a common name in hard mode. Throws if the area can't supply enough. */
+/** Pick `n` question species (with photos) from a candidate list. Throws if the
+ *  area can't supply enough. */
 async function pickMatchQuestions(
   loc: MatchLocation,
-  pool: AreaPool,
+  candidates: AreaSpecies[],
   n: number,
-  mode: GameMode,
 ): Promise<{ species: AreaSpecies; photos: PoolPhoto[] }[]> {
-  let candidates = pool.species;
-  if (mode === "hard") {
-    const named = pool.species.filter((p) => p.commonName);
-    if (named.length >= n) candidates = named;
-  }
   const picked = await collectQuestionsWithPhotos(
-    candidates,
+    shuffle([...candidates]),
     n,
     Number(loc.lat.toFixed(3)),
     Number(loc.lng.toFixed(3)),
@@ -528,19 +619,27 @@ export async function buildRoundsForLocations(
     getAreaPool(opponentLoc.lat, opponentLoc.lng, opponentLoc.radius),
   ]);
 
+  // Normal/Hard only quiz species with a common name; Taxonomist uses all.
+  const cPlayable = requireCommonName(mode) ? cPool.species.filter((p) => p.commonName) : cPool.species;
+  const oPlayable = requireCommonName(mode) ? oPool.species.filter((p) => p.commonName) : oPool.species;
+
   const [cQuestions, oQuestions] = await Promise.all([
-    pickMatchQuestions(challengerLoc, cPool, half, mode),
-    pickMatchQuestions(opponentLoc, oPool, half, mode),
+    pickMatchQuestions(challengerLoc, cPlayable, half),
+    pickMatchQuestions(opponentLoc, oPlayable, half),
   ]);
 
   const rounds: MatchRound[] = [];
   for (let i = 0; i < half; i++) {
+    const [cPhotos, oPhotos] = await Promise.all([
+      selectRoundPhotos(cQuestions[i].photos),
+      selectRoundPhotos(oQuestions[i].photos),
+    ]);
     rounds.push({
-      ...assembleRound(cQuestions[i].species, cQuestions[i].photos, cPool.species, mode),
+      ...assembleRound(cQuestions[i].species, cPhotos, cPlayable, mode),
       owner: "challenger",
     });
     rounds.push({
-      ...assembleRound(oQuestions[i].species, oQuestions[i].photos, oPool.species, mode),
+      ...assembleRound(oQuestions[i].species, oPhotos, oPlayable, mode),
       owner: "opponent",
     });
   }

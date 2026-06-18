@@ -26,9 +26,6 @@ type GeoStatus = "idle" | "locating" | "ready" | "denied";
 
 const TOTAL_ROUNDS = 15;
 const LIFELINES = 3;
-// How many of the just-shown species to keep out of the next round, so nothing
-// repeats back-to-back (a missed species can return after this many rounds).
-const COOLDOWN = 2;
 
 const MODES: { id: GameMode; label: string; blurb: string }[] = [
   { id: "normal", label: "Normal", blurb: "Pick the species from 4 choices." },
@@ -44,7 +41,7 @@ async function fetchRound(
   coords: Coords,
   radius: number,
   mode: GameMode,
-  cooldown: number[],
+  seen: number[],
   groups: string[],
 ): Promise<Round> {
   const params = new URLSearchParams({
@@ -54,7 +51,7 @@ async function fetchRound(
     mode,
     groups: groups.join(","),
   });
-  if (cooldown.length) params.set("cooldown", cooldown.join(","));
+  if (seen.length) params.set("seen", seen.join(","));
   const res = await fetch(`/api/round?${params}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ?? "Failed to load a round.");
@@ -117,10 +114,9 @@ export default function Home() {
 
   const [score, setScore] = useState(0);
   const [stats, setStats] = useState<Stats | null>(null);
-  // The last few species shown, kept out of the next round so nothing repeats
-  // back-to-back. Mastered species are excluded server-side from the player's
-  // profile; this is just a short in-session anti-repeat window.
-  const [cooldown, setCooldown] = useState<number[]>([]);
+  // Every species shown this game, so none repeats within a single game. (Across
+  // games, repeats are avoided at the photo level server-side, not the species.)
+  const [seenTaxa, setSeenTaxa] = useState<number[]>([]);
 
   const { user } = useUser();
 
@@ -163,11 +159,11 @@ export default function Home() {
   }, [locate]);
 
   const roundQuery = useQuery({
-    // cooldown is deliberately not in the key — it updates when a round is
+    // seenTaxa is deliberately not in the key — it updates when a round is
     // answered, and we don't want that to refetch the round being viewed.
-    // roundSeq drives refetches; the queryFn reads the latest cooldown.
+    // roundSeq drives refetches; the queryFn reads the latest seenTaxa.
     queryKey: ["round", coords?.lat, coords?.lng, radius, mode, groups.join(","), roundSeq],
-    queryFn: () => fetchRound(coords!, radius, mode, cooldown, groups),
+    queryFn: () => fetchRound(coords!, radius, mode, seenTaxa, groups),
     enabled: started && !gameOver && coords != null,
   });
 
@@ -220,7 +216,7 @@ export default function Home() {
     setStats(null);
     setRoundNumber(1);
     setLifelinesLeft(LIFELINES);
-    setCooldown([]);
+    setSeenTaxa([]);
     setGameOver(false);
     setStarted(true);
     setSettingsOpen(false);
@@ -244,9 +240,11 @@ export default function Home() {
 
   function onAnswered(result: GuessResult) {
     setScore((s) => s + (result.correct ? 1 : 0));
-    // Keep a short rolling window of just-shown species for the anti-repeat
-    // cooldown. The guess itself is recorded on the player's profile server-side.
-    setCooldown((prev) => [result.correctTaxonId, ...prev].slice(0, COOLDOWN));
+    // Remember this species so it can't recur later in the same game. The guess
+    // itself is recorded on the player's profile server-side.
+    setSeenTaxa((prev) =>
+      prev.includes(result.correctTaxonId) ? prev : [...prev, result.correctTaxonId],
+    );
   }
 
   const round = roundQuery.data;

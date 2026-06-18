@@ -1,7 +1,12 @@
 import type { NextRequest } from "next/server";
-import { buildRound, RoundError, type GameMode } from "@/lib/inat";
-import { getCorrectTaxa } from "@/lib/mastery";
+import { buildRound, RoundError, type GameMode, type PhotoStore } from "@/lib/inat";
+import { getSeenPhotos, recordSeenPhotos, getRecentTaxa } from "@/lib/mastery";
 import { groupsToTaxonFilter } from "@/lib/taxonGroups";
+
+const photoStore: PhotoStore = {
+  getSeen: getSeenPhotos,
+  recordSeen: recordSeenPhotos,
+};
 
 const MODES: GameMode[] = ["normal", "hard", "botanist"];
 
@@ -12,10 +17,8 @@ export async function GET(request: NextRequest) {
   const radius = Math.min(200, Math.max(1, Number(sp.get("radius")) || 25));
   const modeParam = sp.get("mode") as GameMode | null;
   const mode = modeParam && MODES.includes(modeParam) ? modeParam : "normal";
-  // The last couple of species shown, kept out of the next round so nothing
-  // repeats back-to-back. Species already mastered in this mode are read from
-  // the player's profile server-side instead of trusting the client.
-  const cooldown = (sp.get("cooldown") ?? "")
+  // Species already shown this game (client-tracked), never repeated within a game.
+  const seen = (sp.get("seen") ?? "")
     .split(",")
     .map(Number)
     .filter(Number.isFinite);
@@ -34,8 +37,8 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const correctTaxa = await getCorrectTaxa(mode);
-    const round = await buildRound(lat, lng, radius, mode, correctTaxa, cooldown, filter);
+    const recentTaxa = await getRecentTaxa(mode);
+    const round = await buildRound(lat, lng, radius, mode, seen, recentTaxa, filter, photoStore);
     return Response.json(round);
   } catch (e) {
     if (e instanceof RoundError) {

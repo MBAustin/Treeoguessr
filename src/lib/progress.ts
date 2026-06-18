@@ -28,6 +28,7 @@ export async function saveResult(r: GameResultInput): Promise<void> {
 export interface Stats {
   games: number;
   best: number;
+  average: number;
 }
 
 /** Lifetime stats for the signed-in player, or null if not signed in. */
@@ -43,5 +44,8 @@ export async function getStats(): Promise<Stats | null> {
     .select("score")
     .order("score", { ascending: false });
   if (!data) return null;
-  return { games: data.length, best: data[0]?.score ?? 0 };
+  const games = data.length;
+  const best = data[0]?.score ?? 0;
+  const average = games ? data.reduce((sum, r) => sum + (r.score ?? 0), 0) / games : 0;
+  return { games, best, average };
 }

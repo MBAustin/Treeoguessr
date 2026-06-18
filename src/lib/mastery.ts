@@ -8,6 +8,31 @@ const supabaseConfigured = Boolean(
   process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
 );
 
+// How many recently-seen species to soft-de-prioritize for cross-game variety.
+const RECENT_TAXA_LIMIT = 200;
+
+/** The player's most-recently-seen species in `mode` (newest first), used to nudge
+ *  round selection toward fresher species. Empty for guests. */
+export async function getRecentTaxa(mode: GameMode): Promise<number[]> {
+  if (!supabaseConfigured) return [];
+  try {
+    const sb = await createClient();
+    const {
+      data: { user },
+    } = await sb.auth.getUser();
+    if (!user) return [];
+    const { data } = await sb
+      .from("species_guesses")
+      .select("taxon_id")
+      .eq("mode", mode)
+      .order("updated_at", { ascending: false })
+      .limit(RECENT_TAXA_LIMIT);
+    return (data ?? []).map((r) => Number(r.taxon_id)).filter(Number.isFinite);
+  } catch {
+    return [];
+  }
+}
+
 /** Taxon ids the signed-in player has guessed correctly in `mode`. Empty for guests. */
 export async function getCorrectTaxa(mode: GameMode): Promise<number[]> {
   if (!supabaseConfigured) return [];
@@ -26,6 +51,43 @@ export async function getCorrectTaxa(mode: GameMode): Promise<number[]> {
     return (data ?? []).map((r) => Number(r.taxon_id)).filter(Number.isFinite);
   } catch {
     return [];
+  }
+}
+
+/**
+ * Of `photoIds`, which the signed-in player has already been shown. Used to avoid
+ * repeating photos across games. Empty set for guests (no cross-game memory).
+ */
+export async function getSeenPhotos(photoIds: number[]): Promise<Set<number>> {
+  if (!supabaseConfigured || photoIds.length === 0) return new Set();
+  try {
+    const sb = await createClient();
+    const {
+      data: { user },
+    } = await sb.auth.getUser();
+    if (!user) return new Set();
+    const { data } = await sb.from("seen_photos").select("photo_id").in("photo_id", photoIds);
+    return new Set((data ?? []).map((r) => Number(r.photo_id)));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Record photos just shown to the player. No-op for guests; best-effort. */
+export async function recordSeenPhotos(photoIds: number[]): Promise<void> {
+  if (!supabaseConfigured || photoIds.length === 0) return;
+  try {
+    const sb = await createClient();
+    const {
+      data: { user },
+    } = await sb.auth.getUser();
+    if (!user) return;
+    const rows = photoIds.map((id) => ({ user_id: user.id, photo_id: id }));
+    await sb
+      .from("seen_photos")
+      .upsert(rows, { onConflict: "user_id,photo_id", ignoreDuplicates: true });
+  } catch {
+    /* best-effort — never block a round on tracking */
   }
 }
 
