@@ -377,8 +377,9 @@ async function fetchLocalPhotos(
 
 /**
  * Choose up to MAX_PHOTOS_PER_ROUND photos from a species' candidate photos,
- * preferring observations the player hasn't seen (via `store`) and reusing seen
- * ones only when nothing fresh remains. Records the chosen photos as seen.
+ * preferring ones the player hasn't seen (via `store`) and reusing seen ones only
+ * when nothing fresh remains. Records the chosen photos as seen. (Used by VS,
+ * where the question species is already fixed.)
  */
 async function selectRoundPhotos(candidates: PoolPhoto[], store?: PhotoStore): Promise<PoolPhoto[]> {
   if (candidates.length === 0) return [];
@@ -388,6 +389,39 @@ async function selectRoundPhotos(candidates: PoolPhoto[], store?: PhotoStore): P
   const chosen = [...unseen, ...reused].slice(0, MAX_PHOTOS_PER_ROUND);
   if (store && chosen.length) await store.recordSeen(chosen.map((p) => p.photoId));
   return chosen;
+}
+
+/**
+ * Pick the solo-round question: the first species (in the given order) that still
+ * has a photo the player hasn't seen, so we don't repeat a photo just because a
+ * species got re-picked. Only when no candidate has anything fresh — the area is
+ * truly exhausted — do we fall back to reusing a seen photo. Records what's shown.
+ */
+async function pickQuestionPhotos(
+  ordered: AreaSpecies[],
+  rlat: number,
+  rlng: number,
+  radius: number,
+  store?: PhotoStore,
+): Promise<{ species: AreaSpecies; photos: PoolPhoto[] } | null> {
+  let fallback: { species: AreaSpecies; photos: PoolPhoto[] } | null = null;
+  for (const species of ordered) {
+    const candidates = await fetchLocalPhotos(species.taxonId, rlat, rlng, radius);
+    if (candidates.length === 0) continue;
+    const seen = store ? await store.getSeen(candidates.map((p) => p.photoId)) : new Set<number>();
+    const unseen = candidates.filter((p) => !seen.has(p.photoId));
+    if (unseen.length > 0) {
+      const photos = shuffle(unseen).slice(0, MAX_PHOTOS_PER_ROUND);
+      if (store) await store.recordSeen(photos.map((p) => p.photoId));
+      return { species, photos };
+    }
+    if (!fallback) fallback = { species, photos: shuffle([...candidates]).slice(0, MAX_PHOTOS_PER_ROUND) };
+  }
+  if (fallback) {
+    if (store) await store.recordSeen(fallback.photos.map((p) => p.photoId));
+    return fallback;
+  }
+  return null;
 }
 
 /**
@@ -555,14 +589,13 @@ export async function buildRound(
   const recentSet = new Set(recentTaxa);
   const ordered = weightedOrder(available, (p) => (recentSet.has(p.taxonId) ? RECENT_WEIGHT : 1));
 
-  const picked = await collectQuestionsWithPhotos(ordered, 1, rlat, rlng, radius);
-  if (picked.length === 0) {
+  const picked = await pickQuestionPhotos(ordered, rlat, rlng, radius, store);
+  if (!picked) {
     throw new RoundError("Couldn't find a usable photo nearby. Try increasing the range.", 404);
   }
 
-  const photos = await selectRoundPhotos(picked[0].photos, store);
   return {
-    ...assembleRound(picked[0].species, photos, playable, mode),
+    ...assembleRound(picked.species, picked.photos, playable, mode),
     location: { lat: rlat, lng: rlng, radius },
   };
 }
